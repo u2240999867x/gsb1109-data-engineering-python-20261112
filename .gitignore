@@ -1,0 +1,14 @@
+*.pyc
+__pycache__
+.coverage
+dist
+*.egg-info
+build
+_build
+twitterlogs
+.eggs
+.pytest_cache
+.tox
+specimens
+.vscode
+.python-version
