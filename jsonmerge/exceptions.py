@@ -23,3 +23,4 @@ class JSONMergeError(Exception):
 class BaseInstanceError(JSONMergeError): pass
 class HeadInstanceError(JSONMergeError): pass
 class SchemaError(JSONMergeError): pass
+class PendingIdError(JSONMergeError): pass

@@ -5,6 +5,8 @@ from jsonmerge.resolver import LocalRefResolver
 from jsonmerge import strategies
 from jsonmerge import descenders
 from jsonmerge.exceptions import SchemaError, JSONMergeError
+from jsonmerge.exceptions import PendingIdError
+from jsonmerge.strategies import IdPatchMerger, PendingRef
 from jsonschema.validators import Draft4Validator
 import logging
 import warnings
@@ -230,6 +232,7 @@ class Merger(object):
         "objectMerge": strategies.ObjectMerge(),
         "arrayMergeById": strategies.ArrayMergeById(),
         "arrayMergeByIndex": strategies.ArrayMergeByIndex(),
+        "patchingArrayMergeById": strategies.PendingArrayMergeById(),
     }
 
     def __init__(self, schema, strategies=(), objclass_def='dict', objclass_menu=None,
@@ -368,6 +371,14 @@ class Merger(object):
 
         walk = WalkSchema(self, merge_options)
         return walk.descend(schema).val
+
+    def id_patcher(self):
+        """Return an IdPatchMerger for rows quarantined by this Merger.
+
+        Raises PendingIdError if the merge schema does not use the
+        'patchingArrayMergeById' strategy anywhere.
+        """
+        return IdPatchMerger(self)
 
 def merge(base, head, schema={}):
     """Merge two JSON documents using strategies defined in schema.

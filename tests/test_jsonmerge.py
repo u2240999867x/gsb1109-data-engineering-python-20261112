@@ -2,6 +2,7 @@
 import unittest
 import warnings
 import sys
+import copy
 
 from collections import OrderedDict
 import jsonmerge
@@ -9,7 +10,8 @@ import jsonmerge.strategies
 from jsonmerge.exceptions import (
     HeadInstanceError,
     BaseInstanceError,
-    SchemaError
+    SchemaError,
+    PendingIdError
 )
 from jsonmerge.jsonvalue import JSONValue
 
@@ -1651,6 +1653,346 @@ class TestMerge(unittest.TestCase):
         result = jsonmerge.merge(base, head, schema)
 
         self.assertEqual(result, [ {'c': 2}, {'d': 3} ])
+
+
+class TestPatchingArrayMergeById(unittest.TestCase):
+
+    SCHEMA = {
+        "mergeStrategy": "patchingArrayMergeById",
+        "items": {
+            "properties": {
+                "id": {"type": "string"},
+                "price": {"mergeStrategy": "version"},
+            }
+        }
+    }
+
+    def _merger(self, schema=None):
+        if schema is None:
+            schema = copy.deepcopy(self.SCHEMA)
+        return jsonmerge.Merger(schema)
+
+    def test_missing_and_null_ids_are_quarantined_not_merged(self):
+        merger = self._merger()
+
+        head = [
+            {"id": "A", "price": 10},
+            {"price": 7},
+            {"id": None, "price": 9},
+        ]
+        base = merger.merge(None, head)
+
+        self.assertEqual(base, [{"id": "A", "price": [{"value": 10}]}])
+
+        journal = merger.id_patcher().quarantine()["#"]
+        self.assertEqual(len(journal), 2)
+        self.assertEqual(
+            [(e["reason"], e["batch"], e["row"], e["event"]) for e in journal],
+            [("missing-id", 1, 1, 1), ("null-id", 1, 2, 2)])
+        self.assertEqual(journal[0]["item"], {"price": 7})
+        self.assertEqual(journal[1]["item"], {"id": None, "price": 9})
+
+        refs = merger.id_patcher().pending_refs()
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0].reason, "missing-id")
+        self.assertEqual(refs[1].reason, "null-id")
+        self.assertEqual(refs[0].batch, 1)
+        self.assertEqual(refs[0].row, 1)
+
+    def test_backfill_appends_new_and_merges_existing_in_event_order(self):
+        merger = self._merger()
+        base = merger.merge(None, [
+            {"id": "A", "price": 10},
+            {"price": 7},
+            {"id": None, "price": 9},
+        ])
+        patcher = merger.id_patcher()
+        ref_missing, ref_null = patcher.pending_refs()
+
+        base = merger.merge(base, [
+            {"id": "A", "price": 11},
+            {"id": "B", "price": 20},
+        ])
+
+        base, report = patcher.backfill(base, {ref_missing: "X", ref_null: "B"})
+
+        statuses = {(r["ref"], r["status"]) for r in report}
+        self.assertEqual({(ref_missing, "appended"), (ref_null, "merged")},
+                {(r["ref"], r["status"]) for r in report})
+
+        # The null-id row (event 2) is replayed before batch 2 (event 3), so
+        # B's version list keeps the original event order.
+        self.assertEqual(base, [
+            {"id": "A", "price": [{"value": 10}, {"value": 11}]},
+            {"id": "X", "price": [{"value": 7}]},
+            {"id": "B", "price": [{"value": 9}, {"value": 20}]},
+        ])
+
+    def test_backfill_matches_one_shot_complete_id_baseline(self):
+        merger = self._merger()
+        base = merger.merge(None, [
+            {"id": "A", "price": 10},
+            {"price": 7},
+            {"id": None, "price": 9},
+        ])
+        patcher = merger.id_patcher()
+        ref_missing, ref_null = patcher.pending_refs()
+
+        base = merger.merge(base, [
+            {"id": "A", "price": 11},
+            {"id": "B", "price": 20},
+        ])
+        base, _ = patcher.backfill(base, {ref_missing: "X", ref_null: "B"})
+
+        baseline_merger = self._merger()
+        baseline = None
+        baseline = baseline_merger.merge(baseline, [
+            {"id": "A", "price": 10},
+            {"id": "X", "price": 7},
+            {"id": "B", "price": 9},
+        ])
+        baseline = baseline_merger.merge(baseline, [
+            {"id": "A", "price": 11},
+            {"id": "B", "price": 20},
+        ])
+
+        self.assertEqual(base, baseline)
+
+    def test_other_entities_are_not_rewritten_on_backfill(self):
+        merger = self._merger()
+        base = merger.merge(None, [
+            {"id": "A", "price": 1},
+            {"price": 9},
+        ])
+        patcher = merger.id_patcher()
+        ref = patcher.pending_refs()[0]
+
+        base = merger.merge(base, [{"id": "A", "price": 2}])
+        versions_before = base[0]["price"]
+
+        base, _ = patcher.backfill(base, {ref: "Z"})
+
+        self.assertEqual(base[0]["price"], versions_before)
+        self.assertEqual(base[0]["price"], [{"value": 1}, {"value": 2}])
+
+    def test_duplicate_patch_is_digested_once(self):
+        merger = self._merger()
+        base = merger.merge(None, [{"price": 1}])
+        patcher = merger.id_patcher()
+        ref = patcher.pending_refs()[0]
+
+        base, first = patcher.backfill(base, {ref: "X"})
+        self.assertEqual(first[0]["status"], "appended")
+        self.assertEqual(patcher.pending_refs(), [])
+
+        again, second = patcher.backfill(base, [(ref, "X")])
+        self.assertEqual(second[0]["status"], "duplicate")
+        self.assertEqual(again, base)
+
+    def test_ambiguous_backfill_lists_original_rows_and_stays_open(self):
+        merger = self._merger()
+        # Base supplied externally already contains two rows sharing id D.
+        base = [{"id": "D", "v": 1}, {"id": "D", "v": 2}]
+        base = merger.merge(base, [{"v": 3}])
+        patcher = merger.id_patcher()
+        ref = patcher.pending_refs()[0]
+
+        result, report = patcher.backfill(base, {ref: "D"})
+
+        self.assertEqual(report[0]["status"], "ambiguous")
+        self.assertEqual(report[0]["collisions"],
+                [{"id": "D", "v": 1}, {"id": "D", "v": 2}])
+        self.assertEqual(result, base)
+        # The reference remains open and can be patched with another id.
+        self.assertEqual(patcher.pending_refs(), [ref])
+
+        result, report = patcher.backfill(result, {ref: "E"})
+        self.assertEqual(report[0]["status"], "appended")
+        self.assertEqual(result, [
+            {"id": "D", "v": 1}, {"id": "D", "v": 2}, {"v": 3, "id": "E"}])
+
+    def test_backfill_then_further_batches_stay_consistent(self):
+        merger = self._merger()
+        base = merger.merge(None, [{"id": "A", "price": 1}, {"price": 9}])
+        patcher = merger.id_patcher()
+        ref = patcher.pending_refs()[0]
+        base, _ = patcher.backfill(base, {ref: "Z"})
+
+        base = merger.merge(base, [
+            {"id": "A", "price": 2},
+            {"id": "Z", "price": 10},
+        ])
+
+        baseline_merger = self._merger()
+        baseline = baseline_merger.merge(None, [
+            {"id": "A", "price": 1}, {"id": "Z", "price": 9}])
+        baseline = baseline_merger.merge(baseline, [
+            {"id": "A", "price": 2}, {"id": "Z", "price": 10}])
+
+        self.assertEqual(base, baseline)
+
+    def test_nested_arrays_are_isolated_and_siblings_untouched(self):
+        schema = {
+            "properties": {
+                "awards": {
+                    "mergeStrategy": "patchingArrayMergeById",
+                    "items": {"properties": {
+                        "id": {}, "price": {"mergeStrategy": "version"}}},
+                },
+                "meta": {"mergeStrategy": "version"},
+            }
+        }
+        merger = jsonmerge.Merger(schema)
+        base = merger.merge(None, {
+            "awards": [{"id": "A", "price": 1}, {"price": 5}],
+            "meta": {"rev": 1},
+        })
+        patcher = merger.id_patcher()
+        self.assertEqual(list(patcher.quarantine().keys()), ["#/awards"])
+        ref = patcher.pending_refs()[0]
+
+        base = merger.merge(base, {
+            "awards": [{"id": "A", "price": 2}],
+            "meta": {"rev": 2},
+        })
+        base, report = patcher.backfill(base, {ref: "N"})
+
+        self.assertEqual(report[0]["status"], "appended")
+        self.assertEqual(base, {
+            "awards": [
+                {"id": "A", "price": [{"value": 1}, {"value": 2}]},
+                {"id": "N", "price": [{"value": 5}]},
+            ],
+            "meta": [{"value": {"rev": 1}}, {"value": {"rev": 2}}],
+        })
+
+    def test_multiple_patching_arrays_keep_separate_journals(self):
+        schema = {
+            "properties": {
+                "a": {"mergeStrategy": "patchingArrayMergeById"},
+                "b": {"mergeStrategy": "patchingArrayMergeById"},
+            }
+        }
+        merger = jsonmerge.Merger(schema)
+        merger.merge(None, {"a": [{"x": 1}], "b": [{"y": 2}]})
+
+        patcher = merger.id_patcher()
+        self.assertEqual(sorted(patcher.quarantine().keys()),
+                ["#/a", "#/b"])
+        self.assertEqual(len(patcher.pending_refs()), 2)
+
+    def test_ignore_id_is_respected(self):
+        schema = {
+            "mergeStrategy": "patchingArrayMergeById",
+            "mergeOptions": {"ignoreId": "IG"},
+        }
+        merger = jsonmerge.Merger(schema)
+        base = merger.merge(None, [
+            {"id": "IG", "x": 1},
+            {"x": 2},
+            {"id": None, "x": 3},
+        ])
+
+        self.assertEqual(base, [])
+        self.assertEqual(len(merger.id_patcher().quarantine()["#"]), 2)
+
+    def test_custom_id_ref(self):
+        schema = {
+            "mergeStrategy": "patchingArrayMergeById",
+            "mergeOptions": {"idRef": "/key/code"},
+            "items": {"properties": {"v": {"mergeStrategy": "version"}}},
+        }
+        merger = jsonmerge.Merger(schema)
+        base = merger.merge(None, [
+            {"key": {"code": "K1"}, "v": 1},
+            {"key": {}, "v": 2},
+            {"key": {"code": None}, "v": 3},
+        ])
+        patcher = merger.id_patcher()
+        ref_missing, ref_null = patcher.pending_refs()
+        self.assertEqual(ref_missing.reason, "missing-id")
+        self.assertEqual(ref_null.reason, "null-id")
+
+        base = merger.merge(base, [{"key": {"code": "K4"}, "v": 4}])
+        base, report = patcher.backfill(base, {ref_missing: "K2", ref_null: "K4"})
+
+        self.assertEqual([r["status"] for r in report], ["appended", "merged"])
+        self.assertEqual(base, [
+            {"key": {"code": "K1"}, "v": [{"value": 1}]},
+            {"key": {"code": "K2"}, "v": [{"value": 2}]},
+            {"key": {"code": "K4"}, "v": [{"value": 3}, {"value": 4}]},
+        ])
+
+    def test_root_id_ref_scalar_array(self):
+        schema = {
+            "mergeStrategy": "patchingArrayMergeById",
+            "mergeOptions": {"idRef": "/"},
+        }
+        merger = jsonmerge.Merger(schema)
+        base = merger.merge(None, [1, None, 3])
+        patcher = merger.id_patcher()
+        self.assertEqual(
+            [(e["reason"], e["row"]) for e in patcher.quarantine()["#"]],
+            [("null-id", 1)])
+
+        ref = patcher.pending_refs()[0]
+        base, report = patcher.backfill(base, {ref: 2})
+        self.assertEqual(report[0]["status"], "appended")
+        self.assertEqual(base, [1, 2, 3])
+
+    def test_sort_by_ref_is_applied_on_rebuild(self):
+        schema = {
+            "mergeStrategy": "patchingArrayMergeById",
+            "mergeOptions": {"sortByRef": "id"},
+        }
+        merger = jsonmerge.Merger(schema)
+        base = merger.merge(None, [{"id": "Z"}, {"v": 1}])
+        ref = merger.id_patcher().pending_refs()[0]
+
+        base, _ = merger.id_patcher().backfill(base, {ref: "A"})
+        self.assertEqual(base, [{"id": "A", "v": 1}, {"id": "Z"}])
+
+    def test_non_unique_head_within_batch_still_raises(self):
+        merger = self._merger()
+        with self.assertRaises(HeadInstanceError):
+            merger.merge(None, [
+                {"id": "A", "price": 1},
+                {"id": "A", "price": 2},
+            ])
+
+    def test_backfill_creating_duplicate_in_source_batch_raises(self):
+        merger = self._merger()
+        base = merger.merge(None, [
+            {"id": "A", "price": 10},
+            {"price": 7},
+        ])
+        patcher = merger.id_patcher()
+        ref = patcher.pending_refs()[0]
+
+        with self.assertRaises(HeadInstanceError):
+            patcher.backfill(base, {ref: "A"})
+
+    def test_id_patcher_without_strategy_raises(self):
+        merger = jsonmerge.Merger({"mergeStrategy": "arrayMergeById"})
+        with self.assertRaises(PendingIdError):
+            merger.id_patcher()
+
+    def test_unknown_or_invalid_patch_reference_raises(self):
+        merger = self._merger()
+        base = merger.merge(None, [{"price": 1}])
+        patcher = merger.id_patcher()
+
+        with self.assertRaises(PendingIdError):
+            patcher.backfill(base, {jsonmerge.PendingRef("unknown"): "X"})
+
+        with self.assertRaises(PendingIdError):
+            patcher.backfill(base, {"not-a-ref": "X"})
+
+    def test_get_schema(self):
+        merger = self._merger()
+        schema = merger.get_schema()
+        jsonschema.validate(
+            [{"id": "x", "price": [{"value": 1}]}], schema)
 
 
 class TestGetSchema(unittest.TestCase):

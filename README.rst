@@ -267,6 +267,75 @@ arrayMergeById
   *JSON pointer*. The pointer is resolved in the same way as *idRef*. Sort
   order can be reversed by setting the *sortReverse* option.
 
+patchingArrayMergeById
+  Like *arrayMergeById*, but head items without a usable ID are quarantined
+  instead of being silently ignored. An item is quarantined when its *idRef*
+  pointer cannot be resolved (a missing ID) or when it resolves to an
+  explicit JSON null. The original *arrayMergeById* strategy keeps treating
+  null as an ordinary key; only this strategy treats it as "ID not known
+  yet".
+
+  Every quarantined row is kept in a journal together with the batch and the
+  source row it arrived in, the reason it could not be matched
+  (``missing-id`` or ``null-id``) and its ordinal position in the event
+  sequence. Use ``Merger.id_patcher()`` to obtain an *IdPatchMerger* and its
+  open ``pending_refs()`` / ``quarantine()``.
+
+  Once the missing ID is known, pass a mapping of pending reference to ID to
+  the patcher's ``backfill()``. The row is replayed at its original position
+  in the event sequence by rebuilding the array from its original base, so
+  the version history of every other entity is preserved and never rewritten.
+  The result is identical to merging the same rows in one pass with complete
+  IDs, which can be used as a reconciliation baseline::
+
+      >>> from pprint import pprint
+      >>> from jsonmerge import Merger
+
+      >>> schema = {
+      ...     "mergeStrategy": "patchingArrayMergeById",
+      ...     "items": {"properties": {
+      ...         "id": {"type": "string"},
+      ...         "price": {"mergeStrategy": "version"}}}
+      ... }
+      >>> merger = Merger(schema)
+
+      >>> base = merger.merge(None, [
+      ...     {"id": "A", "price": 10},
+      ...     {"price": 7},
+      ...     {"id": None, "price": 9},
+      ... ])
+      >>> patcher = merger.id_patcher()
+      >>> [(e["reason"], e["batch"], e["row"])
+      ...  for e in patcher.quarantine()["#"]]
+      [('missing-id', 1, 1), ('null-id', 1, 2)]
+
+      >>> ref_missing, ref_null = patcher.pending_refs()
+      >>> base = merger.merge(base, [{"id": "B", "price": 20}])
+      >>> base, report = patcher.backfill(
+      ...     base, {ref_missing: "X", ref_null: "B"})
+      >>> pprint(base, width=40)
+      [{'id': 'A', 'price': [{'value': 10}]},
+       {'id': 'X', 'price': [{'value': 7}]},
+       {'id': 'B',
+        'price': [{'value': 9},
+                  {'value': 20}]}]
+
+  Each pending reference is digested at most once: resubmitting the same
+  patch returns a ``duplicate`` report entry and changes nothing::
+
+      >>> base, report = patcher.backfill(base, {ref_missing: "X"})
+      >>> [entry["status"] for entry in report]
+      ['duplicate']
+
+  When a backfilled ID matches more than one existing row, the merge would be
+  ambiguous. In that case nothing is merged, the colliding original rows are
+  returned in the report's ``collisions`` field and the reference stays open
+  so it can be patched again. An ID matching a single row is merged, and an
+  ID matching no row is appended, following the ordinary *arrayMergeById*
+  rules. All options supported by *arrayMergeById* (``idRef``, ``ignoreId``,
+  ``sortByRef`` and ``sortReverse``) are supported here as well. Backfill of
+  compound *idRef* arrays is not supported and raises ``PendingIdError``.
+
 arrayMergeByIndex
   Merge array items by their index in the array. Similarly to
   *arrayMergeById* strategy, the resulting arrays have items from both
