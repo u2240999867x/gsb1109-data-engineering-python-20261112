@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+from pyhocon.exact_period import Period
+
 try:
     from dateutil.relativedelta import relativedelta
 except Exception:
@@ -7,11 +9,19 @@ except Exception:
 
 
 def is_timedelta_like(config):
-    return isinstance(config, timedelta) or relativedelta is not None and isinstance(config, relativedelta)
+    return (isinstance(config, timedelta) or isinstance(config, Period)
+            or relativedelta is not None and isinstance(config, relativedelta))
+
+
+def period_to_hocon(period):
+    """:type period: Period"""
+    return period.to_hocon()
 
 
 def timedelta_to_hocon(config):
-    """:type config: timedelta|relativedelta"""
+    """:type config: timedelta|relativedelta|Period"""
+    if isinstance(config, Period):
+        return period_to_hocon(config)
     if relativedelta is not None and isinstance(config, relativedelta):
         if config.hours > 0:
             return str(config.hours) + ' hours'
@@ -38,7 +48,9 @@ def relative_delta_to_timedelta(relative_delta):
 
 
 def timedelta_to_str(config):
-    if relativedelta is not None and isinstance(config, relativedelta):
+    if isinstance(config, Period):
+        time_delta = config.to_timedelta()
+    elif relativedelta is not None and isinstance(config, relativedelta):
         time_delta = relative_delta_to_timedelta(config)
     else:
         time_delta = config

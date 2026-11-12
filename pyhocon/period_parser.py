@@ -67,5 +67,14 @@ def get_period_expr():
     ).set_parse_action(convert_period)
 
 
-def parse_period(content):
+def parse_period(content, exact=False):
+    """Parse a HOCON period string.
+
+    With ``exact=True`` a fidelity-preserving :class:`pyhocon.exact_period.Period`
+    is returned instead of a timedelta/relativedelta: signed decimal fixed
+    units, whole months/years and compound items are kept as written.
+    """
+    if exact:
+        from pyhocon.exact_period import parse_exact_period
+        return parse_exact_period(content)
     return get_period_expr().parse_string(content, parse_all=True)[0]

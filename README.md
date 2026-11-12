@@ -273,6 +273,20 @@ As you can see, the attributes in cat.conf were merged to the ones in dog.conf. 
 * **m** suffix only applies to **minutes**. Spec specifies that **m** can also be applied to **months**, but that would cause a conflict in syntax.
 * **months** and **years** only available if dateutils is installed (relativedelta is used instead of timedelta).
 
+### Fidelity-preserving periods
+
+`parse_period(content, exact=True)` returns a `pyhocon.exact_period.Period` that keeps
+every written item instead of approximating it:
+
+* signed decimal fixed units (`0.0000001s`, `-1.5 hours`) stay exact — no zero-width windows;
+* whole `months`/`years` stay calendar units — never collapsed to 30 days;
+* compound items (`1 month 1 day`) apply in written order, with month-end clamped to the
+  last day of the target month (2021-01-30 UTC + 1 month + 1 day → 2021-03-01; swapped → 2021-02-28);
+* `period.to_timedelta()` converts only fixed parts — calendar parts require a datetime anchor;
+* `period_to_hocon(period)` writes a string that parses back to an equal period;
+* `partition_bounds(start, period, count)` yields exact half-open boundaries of adjacent
+  partitions and `locate_partition(bounds, instant)` tells which partition an instant falls in.
+
 ## Misc
 
 ### with_fallback

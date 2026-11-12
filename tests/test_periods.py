@@ -100,3 +100,90 @@ def test_format_time_delta():
                                         (timedelta(seconds=51), '51 seconds'),
                                         (timedelta(microseconds=786), '786 microseconds')):
         assert expected_result == timedelta_to_hocon(time_delta)
+
+
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from pyhocon.exact_period import (Period, locate_partition, parse_exact_period,
+                                  partition_bounds)
+from pyhocon.period_serializer import period_to_hocon
+
+ANCHOR = datetime(2021, 1, 30, tzinfo=timezone.utc)  # non-leap year, UTC
+
+
+class TestExactPeriodParsing(object):
+    def test_signed_decimal_fixed_units(self):
+        assert parse_exact_period('0.0000001s') == parse_exact_period('0.0000001 seconds')
+        assert parse_exact_period('-1.5 hours').components[0].value == Decimal('-1.5')
+        assert parse_exact_period('+2 days').components[0].value == Decimal('2')
+        assert parse_exact_period('0.0000001s').fixed_seconds() == Decimal('0.0000001')
+
+    def test_whole_months_and_years(self):
+        period = parse_exact_period('1 month')
+        assert period.has_calendar
+        assert parse_exact_period('2 years').components[0].months() == 24
+        with pytest.raises(ValueError):
+            parse_exact_period('1.5 months')
+
+    def test_compound_items_keep_written_order(self):
+        period = parse_exact_period('1 month 1 day')
+        assert [component.unit for component in period.components] == ['months', 'days']
+        assert parse_exact_period('1 month, 1 day') == period
+
+    def test_read_option_on_parse_period(self):
+        assert isinstance(parse_period('1 month 1 day', exact=True), Period)
+
+
+class TestExactPeriodApplication(object):
+    def test_month_then_day_from_jan_30(self):
+        assert parse_exact_period('1 month 1 day').apply(ANCHOR) == datetime(
+            2021, 3, 1, tzinfo=timezone.utc)
+
+    def test_day_then_month_from_jan_30(self):
+        assert parse_exact_period('1 day 1 month').apply(ANCHOR) == datetime(
+            2021, 2, 28, tzinfo=timezone.utc)
+
+    def test_month_end_clamps_to_last_day_of_target_month(self):
+        assert parse_exact_period('1 month').apply(ANCHOR) == datetime(
+            2021, 2, 28, tzinfo=timezone.utc)
+
+    def test_fixed_only_conversion_without_anchor(self):
+        assert parse_exact_period('1.5 hours').to_timedelta() == timedelta(minutes=90)
+        assert parse_exact_period('2 days').to_timedelta() == timedelta(days=2)
+
+    def test_calendar_conversion_requires_anchor(self):
+        with pytest.raises(ValueError):
+            parse_exact_period('1 month').to_timedelta()
+        assert parse_exact_period('1 month').to_timedelta(anchor=ANCHOR) == timedelta(days=29)
+
+    def test_sub_microsecond_width_stays_exact_on_epoch_axis(self):
+        period = parse_exact_period('0.0000001s')
+        bounds = partition_bounds(Decimal('0'), period, count=2)
+        assert bounds == [Decimal('0'), Decimal('0.0000001'), Decimal('0.0000002')]
+        assert bounds[1] > bounds[0]  # not a zero-width window
+
+
+class TestExactPeriodRoundTrip(object):
+    @pytest.mark.parametrize('text', [
+        '0.0000001 seconds',
+        '-1.5 hours',
+        '1 month 1 day',
+        '2 years -3 days',
+        '0 seconds',
+    ])
+    def test_write_then_read_keeps_value(self, text):
+        period = parse_exact_period(text)
+        assert parse_exact_period(period_to_hocon(period)) == period
+
+    def test_boundary_membership_survives_round_trip(self):
+        period = parse_exact_period('1 month 1 day')
+        restored = parse_exact_period(period_to_hocon(period))
+        for candidate in (period, restored):
+            bounds = partition_bounds(ANCHOR, candidate, count=2)
+            assert bounds == [datetime(2021, 1, 30, tzinfo=timezone.utc),
+                              datetime(2021, 3, 1, tzinfo=timezone.utc),
+                              datetime(2021, 4, 2, tzinfo=timezone.utc)]
+            just_before = bounds[1] - timedelta(microseconds=1)
+            assert locate_partition(bounds, just_before) == 0
+            assert locate_partition(bounds, bounds[1]) == 1
