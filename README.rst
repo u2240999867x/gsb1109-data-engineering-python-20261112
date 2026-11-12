@@ -169,6 +169,44 @@ To set or add characters as part of word characters
     >>> # []
 
 
+Publish a shared, memory-mapped dictionary
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When several processes query the same read-only dictionary, each
+``KeywordProcessor`` would otherwise build and privately own a full copy of
+the nested-dict trie.  ``SharedKeywordProcessor`` instead publishes the trie
+once as a compact file of fixed-width binary records and opens it read-only
+with ``mmap``.  Readers query the mapped bytes directly, so the trie pages are
+shared through the page cache and a process only touches the branches its
+queries walk; the Python trie is never rebuilt.
+
+Publish (one writer process)::
+
+    >>> from flashtext import KeywordProcessor, SharedKeywordProcessor
+    >>> keyword_processor = KeywordProcessor()
+    >>> keyword_processor.add_keyword('Big Apple', 'New York')
+    >>> SharedKeywordProcessor.publish(keyword_processor, 'keywords.ftxd')
+
+Query (any number of reader processes)::
+
+    >>> with SharedKeywordProcessor.open('keywords.ftxd') as shared:
+    ...     shared.extract_keywords('I love Big Apple.', span_info=True)
+    ...     shared.replace_keywords('I love Big Apple.')
+    [('New York', 7, 16)]
+    'I love New York.'
+
+Extraction, replacement and span boundaries are identical to the
+``KeywordProcessor`` that was published.  Case sensitivity, keyword aliases
+and the non-word-boundary character set are stored inside the file, so every
+reader is pinned to the dictionary version it opened: publish a new version to
+a new path and readers still processing an older batch keep the old results.
+
+``shared.node_lookups`` counts the compact trie nodes a reader actually
+entered; ``shared.reset_counters()`` resets it.  Growing the dictionary ten
+times while keeping the queried prefixes unchanged leaves this count (and the
+private work per query) unchanged.  A runnable, countable example lives in
+``examples/shared_dictionary_demo.py``.
+
+
 Test
 ----
 ::

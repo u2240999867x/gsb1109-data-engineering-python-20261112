@@ -1,1 +1,2 @@
 from flashtext.keyword import KeywordProcessor
+from flashtext.shared import SharedKeywordProcessor

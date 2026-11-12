@@ -52,3 +52,19 @@ Add keywords from dict
 Add keywords from list
 ~~~~~~~~~~~~~~~~~~~~~~
     >>> keyword_processor.add_keywords_from_list(["java", "python"]})
+
+Publish a shared read-only dictionary
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    >>> from flashtext import KeywordProcessor, SharedKeywordProcessor
+    >>> keyword_processor = KeywordProcessor()
+    >>> keyword_processor.add_keyword('Big Apple', 'New York')
+    >>> # one writer process publishes a compact mmap-friendly file
+    >>> SharedKeywordProcessor.publish(keyword_processor, 'keywords.ftxd')
+    >>> # any number of reader processes map the same file read-only
+    >>> with SharedKeywordProcessor.open('keywords.ftxd') as shared:
+    ...     shared.extract_keywords('I love Big Apple.', span_info=True)
+    ...     shared.replace_keywords('I love Big Apple.')
+    [('New York', 7, 16)]
+    'I love New York.'
+    >>> # nodes actually entered by the reader, reset with reset_counters()
+    >>> shared.node_lookups

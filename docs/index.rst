@@ -175,6 +175,7 @@ API doc
 
     api
     keyword_processor
+    shared_keyword_processor
 
 
 Test
