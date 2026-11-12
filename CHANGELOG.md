@@ -2,6 +2,7 @@ In Development
 --------------
 
 * Python 3.8 and 3.9 are no longer supported.
+* The DNS `timeout` is now a per-email-address budget rather than a value written onto the shared resolver's `lifetime`. Each deliverability check computes its own deadline and passes the time remaining on that deadline as the per-query `lifetime` to every MX, A, AAAA, and TXT query, so waits, record-type fallbacks, and retries all draw from the same budget. A shared caching resolver is no longer mutated, so addresses processed concurrently on it can have different deadlines while reusing the same DNS cache; a timeout marks only that address as temporarily unknown and never affects other addresses. Passing both `timeout` and `dns_resolver` is now valid (the `timeout` overrides the resolver's default for that call only).
 * The `original` field of the returned validated email object incorrectly un-escaped the local part of the email address. Now it returns the original address, without any display name, as passed to validate_email.
 * add support python3.15
 * The IPv6 tag of a domain literal is now case-insensitive, as in the RFCs, so `me@[ipv6:::1]` is accepted (and normalized to `me@[IPv6:::1]`) when `allow_domain_literal=True`.

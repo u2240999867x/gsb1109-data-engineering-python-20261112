@@ -165,6 +165,8 @@ while True:
   validate_email(email, dns_resolver=resolver)
 ```
 
+The timeout is a hard budget for one email address: it starts with the first MX query and covers every subsequent wait, MX-to-A/AAAA fallback, and retry until the last query. Each address gets its own deadline and only the time remaining on it is handed to each DNS query, so the shared resolver's `lifetime` is never modified. Several addresses can therefore be processed concurrently on the same caching resolver with different timeouts while sharing its DNS cache, and a timeout marks only that address as temporarily unknown (`mx` is `None`) without affecting any other address. Passing both `timeout=` and `dns_resolver=` is valid; the `timeout` then overrides the resolver's default budget for that single call only.
+
 ### Test addresses
 
 This library rejects email addresses that use the [Special Use Domain Names](https://www.iana.org/assignments/special-use-domain-names/special-use-domain-names.xhtml) `invalid`, `localhost`, `test`, and some others by raising `EmailSyntaxError`. This is to protect your system from abuse: You probably don't want a user to be able to cause an email to be sent to `localhost` (although they might be able to still do so via a malicious MX record). However, in your non-production test environments you may want to use `@test` or `@myname.test` email addresses. There are three ways you can allow this:
