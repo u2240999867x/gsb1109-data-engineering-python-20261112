@@ -1,0 +1,17 @@
+# .coveragerc to control coverage.py
+[run]
+branch = True
+source = jsonpatch
+
+[report]
+show_missing = True
+# Regexes for lines to exclude from consideration
+exclude_lines =
+    # Have to re-enable the standard pragma
+    pragma: no cover
+
+    # No need to test __repr__
+    def __repr__
+
+    # don't include not implemented methods
+    NotImplementedError
