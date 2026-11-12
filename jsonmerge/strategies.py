@@ -218,42 +218,142 @@ class ArrayMergeById(ArrayStrategy):
 
             yield i, key, item
 
+    def _find_duplicate(self, entries):
+        # Return (index, key, item) of the first entry whose key was
+        # already seen, or None if all keys are unique.
+        #
+        # Keys resolved from JSON documents are always hashable, so the
+        # common path is a set lookup done once per entry. Keys returned
+        # by a custom get_key() might not be hashable; those fall back to
+        # equality comparison against previously seen keys.
+        seen = set()
+        unhashable = []
+
+        for i, key, item in entries:
+            try:
+                duplicate = key in seen
+            except TypeError:
+                # The new key is not hashable. Compare it against every
+                # previously seen key, hashable ones included.
+                duplicate = any(key == other_key for other_key in unhashable)
+                if not duplicate:
+                    duplicate = any(key == other_key for other_key in seen)
+                if duplicate:
+                    return i, key, item
+                unhashable.append(key)
+            else:
+                if duplicate:
+                    return i, key, item
+
+                if any(key == other_key for other_key in unhashable):
+                    return i, key, item
+
+                seen.add(key)
+
+        return None
+
+    def _build_index(self, entries):
+        # Build a key -> [(index, item, key), ...] lookup from entries in a
+        # single pass. Hashable keys go into a dict. Keys that are not
+        # hashable are kept in a list and matched by equality, i.e. the
+        # same matching rule as a plain linear scan, only taken rarely.
+        #
+        # last_key is the key of the last iterated entry. It is kept to
+        # reproduce the original duplicate-in-base error message, which
+        # reported that key rather than the key of a matching entry.
+        index = {}
+        unhashable = []
+        last_key = None
+
+        for i, key, item in entries:
+            last_key = key
+            try:
+                index.setdefault(key, []).append((i, item, key))
+            except TypeError:
+                unhashable.append((key, i, item))
+
+        return index, unhashable, last_key
+
+    def _lookup_index(self, key, index, unhashable):
+        # Match against both the hashable index and the unhashable list, so
+        # behavior stays identical to one equality scan over the array even
+        # when a custom get_key() mixes key types.
+        matches = []
+
+        try:
+            bucket = index.get(key)
+        except TypeError:
+            # The lookup key is not hashable: compare it against the
+            # hashable index keys instead of hashing it.
+            for other_key, other_matches in index.items():
+                if key == other_key:
+                    matches.extend(other_matches)
+        else:
+            if bucket:
+                matches.extend(bucket)
+
+        for other_key, i, item in unhashable:
+            if key == other_key:
+                matches.append((i, item, other_key))
+
+        # Keep array order, since the original scan collected matches in
+        # order and reported the second matching index on duplicates.
+        if len(matches) > 1:
+            matches.sort(key=lambda entry: entry[0])
+
+        return matches
+
     def _merge(self, walk, base, head, schema, idRef="id", ignoreId=None, sortByRef=None, sortReverse=None, **kwargs):
         subschema = schema.get('items')
 
         if walk.is_type(subschema, "array"):
             raise SchemaError("This strategy is not supported when 'items' is an array", subschema)
 
-        for i, key_1, item_1 in self.iter_index_key_item(walk, head, idRef):
-            for j, key_2, item_2 in self.iter_index_key_item(walk, head, idRef):
-                if j < i:
-                    if key_1 == key_2:
-                        raise HeadInstanceError("Id '%s' was not unique in head" % (key_1,), item_1)
-                else:
-                    break
+        # Resolve the idRef of each head item exactly once. The resolved
+        # keys are reused for the uniqueness check and for matching below,
+        # instead of re-parsing idRef on every comparison.
+        head_entries = list(self.iter_index_key_item(walk, head, idRef))
 
-        for i, head_key, head_item in self.iter_index_key_item(walk, head, idRef):
+        duplicate = self._find_duplicate(head_entries)
+        if duplicate is not None:
+            i, key, item = duplicate
+            raise HeadInstanceError("Id '%s' was not unique in head" % (key,), item)
+
+        # Resolve the idRef of each base item exactly once as well. Head
+        # keys are unique, so any base position is replaced at most once
+        # and appends only add keys that no later head item can match;
+        # indexing the base up front is therefore equivalent to rescanning
+        # it for every head item.
+        base_index, base_unhashable, last_base_key = self._build_index(
+            self.iter_index_key_item(walk, base, idRef))
+
+        for _, head_key, head_item in head_entries:
 
             if head_key == ignoreId:
                 continue
 
-            matching_j = []
-            for j, base_key, base_item in self.iter_index_key_item(walk, base, idRef):
+            matching = self._lookup_index(head_key, base_index, base_unhashable)
 
-                if base_key == head_key:
-                    matching_j.append(j)
-                    matched_item = base_item
-
-            if len(matching_j) == 1:
+            if len(matching) == 1:
                 # If there was exactly one match, we replace it with a merged item
-                j = matching_j[0]
+                j, matched_item, _ = matching[0]
                 base[j] = walk.descend(subschema, matched_item, head_item)
-            elif len(matching_j) == 0:
+            elif len(matching) == 0:
                 # If there wasn't a match, we append a new object
                 base.append(walk.descend(subschema, JSONValue(undef=True), head_item))
+                # The appended item is seen on every subsequent rescan in
+                # the original implementation, so it becomes the last
+                # iterated base item. Track its key to keep the wording of
+                # any later duplicate-in-base error identical.
+                last_base_key = head_key
             else:
-                j = matching_j[1]
-                raise BaseInstanceError("Id '%s' was not unique in base" % (base_key,), base[j])
+                # Match the original error exactly: the message uses the key
+                # of the last iterated base item, while the value points at
+                # the second matching base item.
+                j = matching[1][0]
+                raise BaseInstanceError(
+                    "Id '%s' was not unique in base" % (last_base_key,),
+                    base[j])
 
         self.sort_array(walk, base, sortByRef, sortReverse)
 

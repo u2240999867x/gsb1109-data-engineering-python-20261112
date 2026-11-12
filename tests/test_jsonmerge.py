@@ -1460,6 +1460,89 @@ class TestMerge(unittest.TestCase):
         base = merger.merge(base, head)
         self.assertEqual(base, expected)
 
+    def test_merge_by_id_large_arrays(self):
+        schema = {
+                'mergeStrategy': 'arrayMergeById',
+        }
+
+        merger = jsonmerge.Merger(schema)
+
+        base = [{"id": i, "f": "base"} for i in range(5000)]
+        head = [{"id": i, "f": "head"} for i in range(2500, 7500)]
+
+        result = merger.merge(base, head)
+
+        self.assertEqual(len(result), 7500)
+        self.assertEqual([item["id"] for item in result], list(range(7500)))
+        self.assertEqual(result[0]["f"], "base")
+        self.assertEqual(result[2500]["f"], "head")
+        self.assertEqual(result[4999]["f"], "head")
+        self.assertEqual(result[7499]["f"], "head")
+
+    def test_merge_by_id_resolves_each_id_once(self):
+        class CountingArrayMergeById(jsonmerge.strategies.ArrayMergeById):
+            def __init__(self):
+                self.key_resolutions = 0
+
+            def get_key(self, walk, item, idRef):
+                self.key_resolutions += 1
+                return super(CountingArrayMergeById, self).get_key(walk, item, idRef)
+
+        strategy = CountingArrayMergeById()
+        merger = jsonmerge.Merger(
+            {"mergeStrategy": "arrayMergeById"},
+            strategies={"arrayMergeById": strategy})
+
+        base = [{"id": i} for i in range(200)]
+        head = [{"id": i} for i in range(100, 300)]
+
+        merger.merge(base, head)
+
+        # One idRef resolution per base and head item; no rescans that
+        # re-parse idRef for every comparison.
+        self.assertEqual(strategy.key_resolutions, len(base) + len(head))
+
+    def test_merge_by_id_unhashable_custom_key(self):
+        class UnhashableKey(object):
+            def __init__(self, value):
+                self.value = value
+
+            def __eq__(self, other):
+                return isinstance(other, UnhashableKey) and \
+                        self.value == other.value
+
+            def __hash__(self):
+                raise TypeError("not hashable")
+
+        class UnhashableKeyStrategy(jsonmerge.strategies.ArrayMergeById):
+            def get_key(self, walk, item, idRef):
+                return UnhashableKey(item.val["k"])
+
+        strategy = UnhashableKeyStrategy()
+        merger = jsonmerge.Merger(
+            {"mergeStrategy": "arrayMergeById"},
+            strategies={"arrayMergeById": strategy})
+
+        base = [{"k": "a", "v": 1}, {"k": "b", "v": 2}]
+        head = [{"k": "b", "v": 3}, {"k": "c", "v": 4}]
+
+        result = merger.merge(base, head)
+        self.assertEqual(result, [
+            {"k": "a", "v": 1},
+            {"k": "b", "v": 3},
+            {"k": "c", "v": 4},
+        ])
+
+        # Duplicate detection still works through equality fallback.
+        with self.assertRaises(HeadInstanceError) as cm:
+            merger.merge([], [{"k": "a"}, {"k": "a"}])
+        self.assertEqual(cm.exception.value.ref, '#/1')
+
+        # Duplicate-in-base error still points at the second matching item.
+        with self.assertRaises(BaseInstanceError) as cm:
+            merger.merge([{"k": "a"}, {"k": "a"}], [{"k": "a"}])
+        self.assertEqual(cm.exception.value.ref, '#/1')
+
     def test_append_with_maxitems(self):
 
         schema = {
