@@ -1,5 +1,12 @@
 # Changelog
 
+# Unreleased
+
+* Add `ConfigExtractor` to export selected keys and their transitive substitution
+  dependencies as a self-contained HOCON document, preserving override history,
+  self-referential appends and optional substitutions; report environment-only
+  references (with dependency chains) and verify equivalence across environments
+
 # Version 0.3.63
 
 * Fix wrong parameter name for pyparsing Keyword (@CribberSix) [#343]

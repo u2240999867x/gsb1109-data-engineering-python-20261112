@@ -3,3 +3,5 @@ from pyhocon.config_tree import ConfigTree, ConfigList, UndefinedKey  # noqa
 from pyhocon.config_tree import ConfigInclude, ConfigSubstitution, ConfigUnquotedString, ConfigValues  # noqa
 from pyhocon.config_tree import ConfigMissingException, ConfigException, ConfigWrongTypeException  # noqa
 from pyhocon.converter import HOCONConverter  # noqa
+from pyhocon.extractor import (  # noqa
+    ConfigExtractor, ExtractionResult, ExternalReference, ConfigExtractionError)

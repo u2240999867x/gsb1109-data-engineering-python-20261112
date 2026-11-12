@@ -291,6 +291,40 @@ config = ConfigFactory.from_dict(d)
 assert config == d
 ```
 
+### Extracting a subset of a configuration
+
+`ConfigExtractor` exports selected keys (for example the columns of one table)
+together with every key reachable from them through substitutions, and drops the
+independent configuration of the other tables. Parse with `resolve=False` so
+that override history, self-referential appends (`+=`) and optional
+substitutions (`${?var}`) are kept; the produced HOCON resolves exactly like the
+original in any target environment.
+
+```python
+from pyhocon import ConfigFactory, ConfigExtractor
+
+source = ConfigFactory.parse_string(open('application.conf').read(), resolve=False)
+
+result = ConfigExtractor.extract(
+    source,
+    columns=['tables.orders.buyer_name', 'tables.orders.buyer_id'])
+
+# Self-contained HOCON with only the selected columns and their transitive deps.
+print(result.hocon)
+# Variables not defined in the config are resolved against the environment.
+print([(ref.variable, ref.optional) for ref in result.external_references])
+
+# Use strict=True to refuse exports that still need a mandatory environment
+# variable; ConfigExtractionError names the affected columns and dependency chains.
+# ConfigExtractor.extract(source, columns, strict=True)
+
+# Verify both documents resolve identically in empty and explicit environments
+# (values, key order, missing optional keys and resolution errors must match).
+ConfigExtractor.assert_equivalent(
+    source, result.hocon, columns,
+    environments=[{}, {'ORDER_NOTE': 'note'}])
+```
+
 ## TODO
 
 | Items                                             |       Status       |
