@@ -360,6 +360,63 @@ validatorclass
     as reference resolution are different between versions. By default, the
     Draft 4 validator is used.
 
+registry
+    A *referencing.Registry* instance. When given, references in the
+    schema are resolved using the *referencing* library instead of the
+    deprecated *jsonschema.RefResolver*. See the "Reference resolution"
+    section below for details and differences between the two resolution
+    paths.
+
+
+Reference resolution
+--------------------
+
+A JSON schema document can contain *$ref* references to other parts of
+the document or to external schemas. *jsonmerge* supports two reference
+resolution paths:
+
+The legacy path is used by default. It is based on the
+*jsonschema.RefResolver* class, which is deprecated as of jsonschema
+4.18.0 and will be removed from a future jsonschema release. With this
+path, references to external schemas that have not been added with
+*Merger.cache_schema()* are automatically fetched over HTTP (or a
+similar protocol). Resolution errors are reported as
+*jsonschema.RefResolutionError* exceptions.
+
+The new path is used when the *registry* argument is passed to the
+*Merger* constructor. It is based on the *referencing* library and
+requires jsonschema 4.18.0 or later. It differs from the legacy path in
+the following ways:
+
+- External references are never fetched over the network. Any external
+  schema must be added up front with *Merger.cache_schema()* (or be
+  present in the registry passed to the constructor, e.g. one created
+  with a custom *retrieve* callback). Unresolvable references raise
+  *referencing.exceptions.Unresolvable*.
+
+- *Merger.cache_schema()* requires that the schema has an *id*/*$id*
+  keyword or that the *uri* argument is given explicitly.
+
+- Both *merge()* and *get_schema()* resolve references against the
+  identity of the merge schema (its *id* or *$id* keyword, depending on
+  the JSON Schema draft selected with *validatorclass*). Relative
+  references in external schemas are resolved against the identity of
+  the schema document that contains them.
+
+- Code that catches reference resolution errors (for example when using
+  the *idRef* or *sortByRef* merge options) should catch
+  *referencing.exceptions.Unresolvable* instead of
+  *jsonschema.RefResolutionError*. The tuple
+  *jsonmerge.resolver.RESOLUTION_ERRORS* contains the exception classes
+  used by whichever resolution path is active.
+
+To migrate, construct the merger with an empty registry and pre-cache
+any external schemas instead of relying on automatic fetching::
+
+    from referencing import Registry
+    merger = jsonmerge.Merger(schema, registry=Registry())
+    merger.cache_schema(external_schema)
+
 
 Support for keywords that apply subschemas
 ------------------------------------------
@@ -395,12 +452,15 @@ Security considerations
 -----------------------
 
 A JSON schema document can contain *$ref* references to external schemas.
-*jsonmerge* resolves URIs in these references using the mechanisms provided
-by the *jsonschema* module. External references can cause HTTP or similar
-network requests to be performed.
+With the default, legacy resolution path, *jsonmerge* resolves URIs in
+these references using the mechanisms provided by the *jsonschema* module.
+External references can cause HTTP or similar network requests to be
+performed.
 
 If *jsonmerge* is used on untrusted input, this may lead to vulnerabilities
-similar to the XML External Entity (XXE) attack.
+similar to the XML External Entity (XXE) attack. Passing a
+*referencing.Registry* to the *Merger* constructor (see "Reference
+resolution" above) disables automatic fetching of external references.
 
 
 Requirements

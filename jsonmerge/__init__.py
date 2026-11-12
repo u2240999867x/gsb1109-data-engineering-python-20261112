@@ -1,7 +1,12 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
 from collections import OrderedDict
 from jsonmerge.jsonvalue import JSONValue
-from jsonmerge.resolver import LocalRefResolver
+from jsonmerge.resolver import (
+    LocalRefResolver,
+    DocumentResolver,
+    RegistryResolver,
+    specification_for_validator,
+)
 from jsonmerge import strategies
 from jsonmerge import descenders
 from jsonmerge.exceptions import SchemaError, JSONMergeError
@@ -24,7 +29,7 @@ class Walk(object):
     def __init__(self, merger, merge_options):
         self.merger = merger
         self.merge_options = merge_options
-        self.resolver = merger.validator.resolver
+        self.resolver = merger.resolver
         self.lvl = -1
 
         self.descenders = [ cls() for cls in self.DESCENDERS ]
@@ -96,8 +101,8 @@ class WalkInstance(Walk):
 
     def __init__(self, merger, base, head, merge_options):
         Walk.__init__(self, merger, merge_options)
-        self.base_resolver = LocalRefResolver("", base.val)
-        self.head_resolver = LocalRefResolver("", head.val)
+        self.base_resolver = DocumentResolver(base.val)
+        self.head_resolver = DocumentResolver(head.val)
 
     def default_strategy(self, schema, base, head, **kwargs):
         log.debug("       : %sdefault strategy" % (self._indent(),))
@@ -138,7 +143,12 @@ class WalkInstance(Walk):
 class WalkSchema(Walk):
 
     def is_base_context(self):
-        return self.resolver.base_uri == self.merger.schema.get('id', '')
+        if hasattr(self.merger.validator, 'ID_OF'):
+            base_uri = self.merger.validator.ID_OF(self.merger.schema) or ''
+        else:
+            # jsonschema<3.0.0
+            base_uri = self.merger.schema.get('id', '')
+        return self.resolver.base_uri == base_uri
 
     def resolve_refs(self, schema):
         # For backwards compatibility with jsonmerge <= 1.3.0
@@ -152,8 +162,15 @@ class WalkSchema(Walk):
         # to resolve these references in the merge schema,
         # we (ab)use it here to do the same for meta data
         # schema.
-        m = Merger(subschema)
-        m.validator.resolver.store.update(self.resolver.store)
+        if self.merger.registry is not None:
+            m = Merger(subschema, registry=self.merger.registry,
+                    validatorclass=type(self.merger.validator))
+            # Make references that are local to the merge schema
+            # resolvable from the meta data schema as well.
+            m._adopt_root_resource(self.merger)
+        else:
+            m = Merger(subschema)
+            m.validator.resolver.store.update(self.resolver.store)
 
         w = WalkSchema(m, merge_options={})
         subschema = w._resolve_refs(JSONValue(subschema), resolve_base=True).val
@@ -233,7 +250,7 @@ class Merger(object):
     }
 
     def __init__(self, schema, strategies=(), objclass_def='dict', objclass_menu=None,
-            validatorclass=Draft4Validator):
+            validatorclass=Draft4Validator, registry=None):
         """Create a new Merger object.
 
         schema -- JSON schema to use when merging.
@@ -241,6 +258,7 @@ class Merger(object):
         objclass_def -- Name of the default class for JSON objects.
         objclass_menu -- Any additional classes for JSON objects.
         validatorclass -- JSON Schema validator class.
+        registry -- referencing.Registry to use for resolving references.
 
         strategies argument should be a dict mapping strategy names to
         instances of Strategy subclasses.
@@ -258,16 +276,43 @@ class Merger(object):
         validatorclass argument can be used to supply a validator class from
         jsonschema. This can be used for example to specify which JSON Schema
         draft version will be used during merge.
+
+        If registry is given, references in the schema are resolved using
+        the referencing library (a referencing.Registry instance, e.g.
+        referencing.Registry()) instead of the deprecated
+        jsonschema.RefResolver. This requires jsonschema>=4.18.0. Both
+        merge() and get_schema() resolve references against the identity
+        of schema ('id' or '$id' keyword, depending on the draft) in this
+        case. Use cache_schema() to add any external schemas to the
+        registry.
         """
 
         self.schema = schema
 
-        if hasattr(validatorclass, 'ID_OF'):
-            resolver = LocalRefResolver.from_schema(schema, id_of=validatorclass.ID_OF)
+        self.registry = None
+        self._specification = None
+        self._root_resource = None
+
+        if registry is not None:
+            from referencing import Resource
+
+            self._specification = specification_for_validator(validatorclass)
+            self._root_resource = Resource.from_contents(schema,
+                    default_specification=self._specification)
+
+            base_uri = self._root_resource.id() or ""
+            self.registry = registry.with_resource(base_uri, self._root_resource)
+            self.resolver = RegistryResolver(self.registry, base_uri)
+            self.validator = validatorclass(schema, registry=self.registry)
         else:
-            # jsonschema<3.0.0
-            resolver = LocalRefResolver.from_schema(schema)
-        self.validator = validatorclass(schema, resolver=resolver)
+            # Deprecated resolution path based on jsonschema.RefResolver.
+            if hasattr(validatorclass, 'ID_OF'):
+                resolver = LocalRefResolver.from_schema(schema, id_of=validatorclass.ID_OF)
+            else:
+                # jsonschema<3.0.0
+                resolver = LocalRefResolver.from_schema(schema)
+            self.resolver = resolver
+            self.validator = validatorclass(schema, resolver=resolver)
 
         self.strategies = dict(self.STRATEGIES)
         self.strategies.update(strategies)
@@ -278,19 +323,31 @@ class Merger(object):
 
         self.objclass_menu['_default'] = self.objclass_menu[objclass_def]
 
+    def _adopt_root_resource(self, other):
+        # Make the root schema of other Merger resolvable through this
+        # Merger's registry, under the same URI it has in other. This
+        # mirrors updating the RefResolver store in the legacy
+        # resolution path.
+        self.registry = self.registry.with_resource(
+                other.resolver.base_uri, other._root_resource)
+        self.resolver.registry = self.registry
+        self.validator = self.validator.evolve(registry=self.registry)
+
     def cache_schema(self, schema, uri=None):
         """Cache an external schema reference.
 
         schema -- JSON schema to cache
         uri -- Optional URI for the schema
 
-        If the JSON schema for merging contains external references, they will
-        be fetched using HTTP from their respective URLs. Alternatively, this
-        method can be used to pre-populate the cache with any external schemas
-        that are already known.
+        If the JSON schema for merging contains external references, they
+        will be fetched using HTTP from their respective URLs when the
+        legacy resolution path is used. Alternatively, this method can be
+        used to pre-populate the cache with any external schemas that are
+        already known. When a registry is used, schemas added with this
+        method are the only way to make external references resolvable.
 
-        If URI is omitted, it is obtained from the schema itself ('id' or '$id'
-        keyword, depending on the JSON Schema draft used)
+        If URI is omitted, it is obtained from the schema itself ('id' or
+        '$id' keyword, depending on the JSON Schema draft used)
         """
 
         if uri is None:
@@ -300,7 +357,20 @@ class Merger(object):
                 # jsonschema<3.0.0
                 uri = schema.get('id', '')
 
-        self.validator.resolver.store.update(((uri, schema),))
+        if self.registry is not None:
+            from referencing import Resource
+
+            if not uri:
+                raise ValueError("'uri' argument is required for schemas "
+                        "without an 'id' or '$id' keyword")
+
+            resource = Resource.from_contents(schema,
+                    default_specification=self._specification)
+            self.registry = self.registry.with_resource(uri, resource)
+            self.resolver.registry = self.registry
+            self.validator = self.validator.evolve(registry=self.registry)
+        else:
+            self.validator.resolver.store.update(((uri, schema),))
 
     def merge(self, base, head, meta=None, merge_options=None):
         """Merge head into base.

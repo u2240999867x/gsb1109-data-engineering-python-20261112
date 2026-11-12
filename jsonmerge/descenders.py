@@ -82,7 +82,15 @@ class OneOf(Descender):
             else:
                 validator = walk.merger.validator
                 if hasattr(validator, 'evolve'):
-                    errors = validator.evolve(schema=schema).iter_errors(v.val)
+                    if walk.merger.registry is not None:
+                        # Keep the current resolution scope so that
+                        # references in the subschema resolve against
+                        # the same base URI as in the merge schema.
+                        validator = validator.evolve(schema=schema,
+                                _resolver=walk.resolver.current_resolver)
+                    else:
+                        validator = validator.evolve(schema=schema)
+                    errors = validator.iter_errors(v.val)
                 else:
                     # jsonschema<4.0.0
                     errors = validator.iter_errors(v.val, schema)

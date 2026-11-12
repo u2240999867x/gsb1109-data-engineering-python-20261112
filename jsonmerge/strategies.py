@@ -3,7 +3,7 @@ from jsonmerge.exceptions import HeadInstanceError, \
                                  BaseInstanceError, \
                                  SchemaError
 from jsonmerge.jsonvalue import JSONValue
-import jsonschema
+from jsonmerge.resolver import RESOLUTION_ERRORS
 import re
 
 class Strategy(object):
@@ -185,7 +185,7 @@ class ArrayStrategy(Strategy):
         def key(item):
             try:
                 return self._resolve_ref(walk, item, sortByRef)
-            except jsonschema.RefResolutionError:
+            except RESOLUTION_ERRORS:
                 return self.default_key()
 
         base.sort(key=key, reverse=bool(sortReverse))
@@ -213,7 +213,7 @@ class ArrayMergeById(ArrayStrategy):
         for i, item in enumerate(jv):
             try:
                 key = self.get_key(walk, item, idRef)
-            except jsonschema.RefResolutionError:
+            except RESOLUTION_ERRORS:
                 continue
 
             yield i, key, item

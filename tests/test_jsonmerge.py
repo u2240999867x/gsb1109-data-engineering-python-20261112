@@ -20,6 +20,13 @@ try:
 except AttributeError:
     Draft6Validator = None
 
+try:
+    from referencing import Registry
+    from referencing.exceptions import Unresolvable
+except ImportError:
+    Registry = None
+    Unresolvable = None
+
 warnings.simplefilter("always")
 
 class TestMerge(unittest.TestCase):
@@ -2643,6 +2650,367 @@ class TestGetSchema(unittest.TestCase):
             merger.merge(base, head)
 
         self.assertIn('arrayMergeByIndex', str(cm.exception))
+
+@unittest.skipIf(Registry is None, 'referencing not installed')
+class TestRegistryResolver(unittest.TestCase):
+    # Tests for the referencing.Registry-based reference resolution
+    # (Merger created with a "registry" argument). All external schemas
+    # are provided locally through cache_schema(); no network access is
+    # required.
+
+    def test_external_refs(self):
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                "a": {
+                    "properties": {
+                        "b": {'mergeStrategy': 'version'},
+                    }
+                },
+            }
+        }
+
+        merger = jsonmerge.Merger(schema_1, registry=Registry())
+        merger.cache_schema(schema_2)
+
+        base = None
+        base = merger.merge(base, {"a": {"b": "c"}})
+        base = merger.merge(base, {"a": {"b": "d"}})
+
+        self.assertEqual(base, {"a": {"b": [{"value": "c"}, {"value": "d"}]}})
+
+    @unittest.skipIf(Draft6Validator is None, 'jsonschema too old')
+    def test_external_refs_draft6(self):
+
+        schema_1 = {
+            '$id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            '$id': 'http://example.com/schema_2.json',
+            'definitions': {
+                "a": {
+                    "properties": {
+                        "b": {'mergeStrategy': 'version'},
+                    }
+                },
+            }
+        }
+
+        merger = jsonmerge.Merger(schema_1, validatorclass=Draft6Validator,
+                registry=Registry())
+        merger.cache_schema(schema_2)
+
+        base = None
+        base = merger.merge(base, {"a": {"b": "c"}})
+        base = merger.merge(base, {"a": {"b": "d"}})
+
+        self.assertEqual(base, {"a": {"b": [{"value": "c"}, {"value": "d"}]}})
+
+    def test_nested_external_refs(self):
+        # schema_2 contains a reference to schema_3 that is relative to
+        # schema_2's own id.
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                "a": {
+                    "properties": {
+                        "b": {'$ref': "schema_3.json#/definitions/b"},
+                    }
+                },
+            }
+        }
+
+        schema_3 = {
+            'id': 'http://example.com/schema_3.json',
+            'definitions': {
+                "b": {'mergeStrategy': 'version'},
+            }
+        }
+
+        merger = jsonmerge.Merger(schema_1, registry=Registry())
+        merger.cache_schema(schema_2)
+        merger.cache_schema(schema_3)
+
+        base = None
+        base = merger.merge(base, {"a": {"b": "c"}})
+        base = merger.merge(base, {"a": {"b": "d"}})
+
+        self.assertEqual(base, {"a": {"b": [{"value": "c"}, {"value": "d"}]}})
+
+    def test_repeated_external_refs(self):
+        # The same external reference is used in two places in the
+        # schema.
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+                'b': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                "a": {
+                    "properties": {
+                        "c": {'mergeStrategy': 'version'},
+                    }
+                },
+            }
+        }
+
+        merger = jsonmerge.Merger(schema_1, registry=Registry())
+        merger.cache_schema(schema_2)
+
+        base = None
+        base = merger.merge(base, {"a": {"c": "x"}, "b": {"c": "y"}})
+        base = merger.merge(base, {"a": {"c": "z"}})
+
+        self.assertEqual(base, {
+            "a": {"c": [{"value": "x"}, {"value": "z"}]},
+            "b": {"c": [{"value": "y"}]},
+        })
+
+        # get_schema() shares the resolution path with merge() and must
+        # keep external references intact.
+        mschema = merger.get_schema()
+        self.assertEqual(mschema['properties']['a'],
+                {'$ref': "schema_2.json#/definitions/a"})
+        self.assertEqual(mschema['properties']['b'],
+                {'$ref': "schema_2.json#/definitions/a"})
+
+    def test_local_refs(self):
+
+        schema = {
+            'properties': {
+                'a': {'$ref': "#/definitions/a"},
+            },
+            'definitions': {
+                'a': {
+                    'properties': {
+                        'b': {'mergeStrategy': 'version'},
+                    }
+                },
+            },
+        }
+
+        merger = jsonmerge.Merger(schema, registry=Registry())
+
+        base = None
+        base = merger.merge(base, {"a": {"b": "c"}})
+        base = merger.merge(base, {"a": {"b": "d"}})
+
+        self.assertEqual(base, {"a": {"b": [{"value": "c"}, {"value": "d"}]}})
+
+        mschema = merger.get_schema()
+        self.assertEqual(mschema, {
+            'properties': {
+                'a': {'$ref': "#/definitions/a"},
+            },
+            'definitions': {
+                'a': {
+                    'properties': {
+                        'b': {'type': 'array', 'items': {'properties': {'value': {}}}},
+                    }
+                },
+            },
+        })
+
+    def test_reference_in_meta(self):
+
+        schema = {'mergeStrategy': 'version'}
+
+        meta_schema = {
+            '$ref': 'http://example.com/schema_2.json#/definitions/meta'
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                'meta': {
+                    'properties': {
+                        'foo': {
+                            'type': 'string'
+                        },
+                        'bar': {
+                            'enum': [ 'a', 'b' ]
+                        }
+                    }
+                }
+            }
+        }
+
+        merger = jsonmerge.Merger(schema, registry=Registry())
+        merger.cache_schema(schema_2)
+
+        mschema = merger.get_schema(merge_options={
+            'version': {'metadataSchema': meta_schema}})
+
+        self.assertEqual(mschema,
+                         {
+                             'type': 'array',
+                             'items': {
+                                 'properties': {
+                                     'value': {},
+                                     'foo': {'type': 'string'},
+                                     'bar': {'enum': ['a', 'b'] },
+                                 }
+                             }
+                         })
+
+    def test_local_reference_in_meta(self):
+
+        schema = {
+                'properties': {
+                    'content': {
+                        'mergeStrategy': 'version',
+                        'mergeOptions': {
+                            'metadataSchema': {
+                                '$ref': '#/definitions/metadata',
+                            },
+                        },
+                    },
+                },
+                'definitions': {
+                    'metadata': {
+                        'properties': {
+                            'revision': {
+                                'type': 'number',
+                            },
+                        },
+                    },
+                },
+        }
+
+        merger = jsonmerge.Merger(schema, registry=Registry())
+        mschema = merger.get_schema()
+
+        self.assertEqual(mschema, {
+                            'properties': {
+                                'content': {
+                                    'type': 'array',
+                                    'items': {
+                                        'properties': {
+                                            'value': {},
+                                            'revision': {
+                                                'type': 'number',
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            'definitions': {
+                                'metadata': {
+                                    'properties': {
+                                        'revision': {
+                                            'type': 'number',
+                                        },
+                                    },
+                                },
+                            },
+                        })
+
+    def test_oneof_external_ref(self):
+        # Validation of oneOf branches must also see schemas added with
+        # cache_schema().
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'oneOf': [
+                {'$ref': "schema_2.json#/definitions/a"},
+                {'type': 'object'},
+            ],
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                'a': {
+                    'type': 'array',
+                    'mergeStrategy': 'append',
+                },
+            },
+        }
+
+        merger = jsonmerge.Merger(schema_1, registry=Registry())
+        merger.cache_schema(schema_2)
+
+        base = None
+        base = merger.merge(base, [1])
+        base = merger.merge(base, [2])
+
+        self.assertEqual(base, [1, 2])
+
+    def test_cache_schema_with_uri(self):
+        # A schema without an 'id' can be cached under an explicit URI.
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            'definitions': {
+                "a": {
+                    "properties": {
+                        "b": {'mergeStrategy': 'version'},
+                    }
+                },
+            }
+        }
+
+        merger = jsonmerge.Merger(schema_1, registry=Registry())
+        merger.cache_schema(schema_2, uri='http://example.com/schema_2.json')
+
+        base = None
+        base = merger.merge(base, {"a": {"b": "c"}})
+        base = merger.merge(base, {"a": {"b": "d"}})
+
+        self.assertEqual(base, {"a": {"b": [{"value": "c"}, {"value": "d"}]}})
+
+    def test_cache_schema_without_id_or_uri(self):
+        merger = jsonmerge.Merger({}, registry=Registry())
+
+        with self.assertRaises(ValueError):
+            merger.cache_schema({'definitions': {}})
+
+    def test_unresolvable_ref(self):
+        # References that are not in the registry must not cause network
+        # access; an Unresolvable error is raised instead.
+
+        schema = {
+            'properties': {
+                'a': {'$ref': "http://example.com/schema_2.json#/definitions/a"},
+            },
+        }
+
+        merger = jsonmerge.Merger(schema, registry=Registry())
+
+        with self.assertRaises(Unresolvable):
+            merger.merge(None, {"a": {"b": "c"}})
 
 class TestExceptions(unittest.TestCase):
     def test_str_with_ref(self):
