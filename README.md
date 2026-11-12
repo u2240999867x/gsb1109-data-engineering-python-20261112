@@ -291,6 +291,44 @@ config = ConfigFactory.from_dict(d)
 assert config == d
 ```
 
+### Environment views and read manifests
+
+By default substitutions that are not defined in the document fall back to
+`os.environ`. Every `parse_*` method accepts an `environment` mapping to use an
+explicit view instead, so a parse never depends on (and never reads) the
+process environment:
+
+```python
+config = ConfigFactory.parse_string(
+    'site_code = ${SITE_CODE}',
+    environment={'SITE_CODE': 'cn-north-1'})
+```
+
+The `parse_string_with_manifest`, `parse_file_with_manifest` and
+`parse_URL_with_manifest` methods return a `(config, read_names)` tuple.
+`read_names` is the minimal list of environment variables effectively read
+during resolution (first-read order, no duplicates). It includes missing
+variables behind optional substitutions such as `${?OPTIONAL_COLUMN}`, because
+their absence decides whether the column exists. Variables that are never
+evaluated (for example a value shadowed by a later literal assignment) are
+excluded, while names the resolver genuinely reads stay in the list even when
+another value ultimately wins; the list is therefore sufficient to replay the
+parse in an otherwise empty environment:
+
+```python
+config, read_names = ConfigFactory.parse_string_with_manifest(
+    content, environment=yesterday_env)
+
+replay_env = {name: yesterday_env[name] for name in read_names
+              if name in yesterday_env}
+replayed, _ = ConfigFactory.parse_string_with_manifest(
+    content, environment=replay_env)
+assert replayed == config
+```
+
+Each parse keeps its own view and manifest, so parses running concurrently in
+different threads are fully isolated.
+
 ## TODO
 
 | Items                                             |       Status       |

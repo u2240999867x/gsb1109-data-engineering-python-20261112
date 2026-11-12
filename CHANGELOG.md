@@ -1,5 +1,10 @@
 # Changelog
 
+# Unreleased
+
+* Add an `environment` parameter to the `ConfigFactory.parse_*` methods so substitutions resolve against a per-parse environment view instead of `os.environ`
+* Add `ConfigFactory.parse_string_with_manifest`, `parse_file_with_manifest` and `parse_URL_with_manifest` returning the minimal list of environment variables actually read, including missing names behind optional substitutions and excluding shadowed override-chain values
+
 # Version 0.3.63
 
 * Fix wrong parameter name for pyparsing Keyword (@CribberSix) [#343]

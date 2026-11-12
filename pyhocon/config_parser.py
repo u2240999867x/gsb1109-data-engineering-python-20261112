@@ -1,5 +1,6 @@
 import codecs
 import contextlib
+import contextvars
 import copy
 import logging
 import os
@@ -53,6 +54,50 @@ def find_package_dirs(name):
 logger = logging.getLogger(__name__)
 
 
+class _EnvironmentContext(object):
+    """Per-parse environment view and the minimal manifest of names actually read.
+
+    ``environment`` is the mapping that substitutions fall back to when a
+    variable is not present in the document. When it is ``None`` the process
+    environment (``os.environ``) is used and no manifest is kept, preserving
+    the legacy behavior. ``read_names`` only records names that are
+    effectively looked up, so variables that are never evaluated (for example
+    a value shadowed by a later literal assignment) never pollute the manifest
+    while missing optional variables do.
+    """
+
+    def __init__(self, environment=None):
+        self.environment = environment
+        self.read_names = [] if environment is not None else None
+
+    def get(self, name):
+        if self.read_names is not None and name not in self.read_names:
+            self.read_names.append(name)
+        environment = os.environ if self.environment is None else self.environment
+        return environment.get(name)
+
+
+# Default context reads os.environ without tracking anything, so legacy
+# callers keep their exact behavior and no mutable state is shared.
+_environment_ctx = contextvars.ContextVar(
+    'pyhocon_environment_ctx', default=_EnvironmentContext()
+)
+
+
+@contextlib.contextmanager
+def _environment_scope(environment):
+    ctx = _EnvironmentContext(environment)
+    token = _environment_ctx.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _environment_ctx.reset(token)
+
+
+def _read_environment(name):
+    return _environment_ctx.get().get(name)
+
+
 #
 # Substitution Defaults
 #
@@ -81,7 +126,8 @@ U_KEY_FMT = '"{0}"'
 class ConfigFactory(object):
 
     @classmethod
-    def parse_file(cls, filename, encoding='utf-8', required=True, resolve=True, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse_file(cls, filename, encoding='utf-8', required=True, resolve=True,
+                   unresolved_value=DEFAULT_SUBSTITUTION, environment=None):
         """Parse file
 
         :param filename: filename
@@ -96,13 +142,19 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param environment: mapping used instead of ``os.environ`` to resolve
+        substitutions that are not defined in the document. When ``None`` the
+        process environment is used, preserving the legacy behavior.
+        :type environment: dict or None
         :return: Config object or []
         :type return: Config or list
         """
         try:
             with codecs.open(filename, 'r', encoding=encoding) as fd:
                 content = fd.read()
-                return cls.parse_string(content, os.path.dirname(filename), resolve, unresolved_value)
+                return cls.parse_string(
+                    content, os.path.dirname(filename), resolve,
+                    unresolved_value, environment=environment)
         except IOError as e:
             if required:
                 raise e
@@ -110,7 +162,39 @@ class ConfigFactory(object):
             return []
 
     @classmethod
-    def parse_URL(cls, url, timeout=None, resolve=True, required=False, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse_file_with_manifest(cls, filename, encoding='utf-8', required=True, resolve=True,
+                                 unresolved_value=DEFAULT_SUBSTITUTION, environment=None):
+        """Parse file and also return the minimal environment read manifest.
+
+        Behaves like :meth:`parse_file` but returns a ``(config, read_names)``
+        tuple where ``read_names`` lists every environment variable that was
+        effectively read during resolution, in first-read order and without
+        duplicates. Variables that are never evaluated (for example a value
+        shadowed by a later literal assignment) are absent, while names the
+        resolver genuinely reads stay present even if another value ultimately
+        wins; missing variables driving optional substitutions (and therefore
+        the presence of optional columns) are included. Pass
+        ``environment`` explicitly to scope the manifest to a given view;
+        when it is ``None`` the process environment is used.
+
+        :return: (Config object or [], list of environment variable names)
+        :type return: tuple
+        """
+        try:
+            with codecs.open(filename, 'r', encoding=encoding) as fd:
+                content = fd.read()
+                return cls.parse_string_with_manifest(
+                    content, os.path.dirname(filename), resolve,
+                    unresolved_value, environment=environment)
+        except IOError as e:
+            if required:
+                raise e
+            logger.warn('Cannot include file %s. File does not exist or cannot be read.', filename)
+            return [], []
+
+    @classmethod
+    def parse_URL(cls, url, timeout=None, resolve=True, required=False,
+                  unresolved_value=DEFAULT_SUBSTITUTION, environment=None):
         """Parse URL
 
         :param url: url to parse
@@ -121,6 +205,10 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param environment: mapping used instead of ``os.environ`` to resolve
+        substitutions that are not defined in the document. When ``None`` the
+        process environment is used, preserving the legacy behavior.
+        :type environment: dict or None
         :return: Config object or []
         :type return: Config or list
         """
@@ -129,7 +217,9 @@ class ConfigFactory(object):
         try:
             with contextlib.closing(urlopen(url, timeout=socket_timeout)) as fd:
                 content = fd.read().decode('utf-8')
-                return cls.parse_string(content, os.path.dirname(url), resolve, unresolved_value)
+                return cls.parse_string(
+                    content, os.path.dirname(url), resolve,
+                    unresolved_value, environment=environment)
         except (HTTPError, URLError) as e:
             logger.warn('Cannot include url %s. Resource is inaccessible.', url)
             if required:
@@ -138,7 +228,34 @@ class ConfigFactory(object):
                 return []
 
     @classmethod
-    def parse_string(cls, content, basedir=None, resolve=True, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse_URL_with_manifest(cls, url, timeout=None, resolve=True, required=False,
+                                unresolved_value=DEFAULT_SUBSTITUTION, environment=None):
+        """Parse URL and also return the minimal environment read manifest.
+
+        Behaves like :meth:`parse_URL` but returns a ``(config, read_names)``
+        tuple; see :meth:`parse_file_with_manifest` for the manifest semantics.
+
+        :return: (Config object or [], list of environment variable names)
+        :type return: tuple
+        """
+        socket_timeout = socket._GLOBAL_DEFAULT_TIMEOUT if timeout is None else timeout
+
+        try:
+            with contextlib.closing(urlopen(url, timeout=socket_timeout)) as fd:
+                content = fd.read().decode('utf-8')
+                return cls.parse_string_with_manifest(
+                    content, os.path.dirname(url), resolve,
+                    unresolved_value, environment=environment)
+        except (HTTPError, URLError) as e:
+            logger.warn('Cannot include url %s. Resource is inaccessible.', url)
+            if required:
+                raise e
+            else:
+                return [], []
+
+    @classmethod
+    def parse_string(cls, content, basedir=None, resolve=True,
+                     unresolved_value=DEFAULT_SUBSTITUTION, environment=None):
         """Parse string
 
         :param content: content to parse
@@ -149,10 +266,53 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param environment: mapping used instead of ``os.environ`` to resolve
+        substitutions that are not defined in the document. When ``None`` the
+        process environment is used, preserving the legacy behavior.
+        :type environment: dict or None
         :return: Config object
         :type return: Config
         """
-        return ConfigParser().parse(content, basedir, resolve, unresolved_value)
+        with cls._scope_environment(environment):
+            return ConfigParser().parse(content, basedir, resolve, unresolved_value)
+
+    @classmethod
+    def parse_string_with_manifest(cls, content, basedir=None, resolve=True,
+                                   unresolved_value=DEFAULT_SUBSTITUTION,
+                                   environment=None):
+        """Parse string and also return the minimal environment read manifest.
+
+        Behaves like :meth:`parse_string` but returns a ``(config, read_names)``
+        tuple where ``read_names`` lists every environment variable that was
+        effectively read during resolution, in first-read order and without
+        duplicates. Variables that are never evaluated (for example a value
+        shadowed by a later literal assignment) are absent, while names the
+        resolver genuinely reads stay present even if another value ultimately
+        wins; missing variables driving optional substitutions (and therefore
+        the presence of optional columns) are included. Pass
+        ``environment`` explicitly to scope the manifest to a given view;
+        when it is ``None`` the process environment is used.
+
+        :return: (Config object, list of environment variable names)
+        :type return: tuple
+        """
+        if environment is None:
+            environment = os.environ
+        with _environment_scope(environment) as env_ctx:
+            config = ConfigParser().parse(content, basedir, resolve, unresolved_value)
+            return config, list(env_ctx.read_names)
+
+    @classmethod
+    @contextlib.contextmanager
+    def _scope_environment(cls, environment):
+        # An explicit view opens a new per-parse scope; ``None`` leaves the
+        # ambient context untouched so nested includes (and nested parses)
+        # share the outer view and its manifest.
+        if environment is None:
+            yield _environment_ctx.get()
+        else:
+            with _environment_scope(environment) as env_ctx:
+                yield env_ctx
 
     @classmethod
     def from_dict(cls, dictionary, root=False):
@@ -443,7 +603,7 @@ class ConfigParser(object):
             return True, config.get(variable)
         except ConfigMissingException:
             # default to environment variable
-            value = os.environ.get(variable)
+            value = _read_environment(variable)
 
             if value is None:
                 if substitution.optional:
@@ -495,7 +655,7 @@ class ConfigParser(object):
                         if len(prop_path) > 1 and config.get(substitution.variable, None) is not None:
                             continue  # If value is present in latest version, don't do anything
                         if prop_path[0] == key:
-                            value = os.environ.get(key)
+                            value = _read_environment(key)
                             if value is not None:
                                 cls._do_substitute(substitution, value)
                                 continue

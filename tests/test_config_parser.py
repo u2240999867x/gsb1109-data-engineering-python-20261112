@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 try:
@@ -2503,6 +2504,210 @@ test2 = test
             'int_from_env': '5'
         }
         assert config.get_int('int_from_env') == 5
+
+    def test_parse_string_with_explicit_environment_view(self):
+        view = {'SITE_CODE': 'cn-north-1', 'UNUSED': 'noise'}
+        config = ConfigFactory.parse_string(
+            """
+            site_code = ${SITE_CODE}
+            """,
+            environment=view)
+        assert config == {'site_code': 'cn-north-1'}
+
+    def test_explicit_environment_view_ignores_process_environment(self, monkeypatch):
+        monkeypatch.setenv('SITE_CODE', 'from-process-env')
+        config = ConfigFactory.parse_string(
+            """
+            site_code = ${SITE_CODE}
+            """,
+            environment={'SITE_CODE': 'from-view'})
+        assert config == {'site_code': 'from-view'}
+
+    def test_environment_manifest_tracks_read_names(self):
+        view = {
+            'SITE_CODE': 'cn-north-1',
+            'PARTITION_DT': '2026-11-11',
+            'IRRELEVANT': 'not referenced',
+        }
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            """
+            ingest {
+                site_code = ${SITE_CODE}
+                partition = ${PARTITION_DT}
+            }
+            """,
+            environment=view)
+        assert config == {
+            'ingest': {
+                'site_code': 'cn-north-1',
+                'partition': '2026-11-11',
+            }
+        }
+        assert sorted(read_names) == ['PARTITION_DT', 'SITE_CODE']
+        assert 'IRRELEVANT' not in read_names
+
+    def test_environment_manifest_records_missing_optional_names(self):
+        # A missing optional substitution removes the column, but its name is
+        # still read and must appear in the manifest so the replay reproduces
+        # the same missing-column outcome.
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            """
+            ingest {
+                site_code = ${SITE_CODE}
+                optional_col = ${?OPTIONAL_COLUMN}
+            }
+            """,
+            environment={'SITE_CODE': 'cn-north-1'})
+        assert 'optional_col' not in config['ingest']
+        assert sorted(read_names) == ['OPTIONAL_COLUMN', 'SITE_CODE']
+
+    def test_environment_manifest_excludes_shadowed_override_chain(self):
+        # The first value is shadowed by the second assignment, so its
+        # environment variable is never read and must stay out of the manifest.
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            """
+            shadowed {
+                a = ${CHAIN_VAR}
+                a = 42
+            }
+            used = ${USED_VAR}
+            """,
+            environment={
+                'CHAIN_VAR': 'shadowed',
+                'USED_VAR': 'kept',
+            })
+        assert config == {'shadowed': {'a': 42}, 'used': 'kept'}
+        assert read_names == ['USED_VAR']
+
+    def test_environment_manifest_keeps_read_shadowed_substitution(self):
+        # When both members of an override chain are substitutions, the
+        # resolver evaluates the earlier one before the later value wins. Its
+        # variable is therefore genuinely read and a mandatory one makes the
+        # parse fail if absent, so it must be kept in the replay manifest.
+        content = "x = ${FIRST_VAR}\nx = ${SECOND_VAR}\n"
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            content, environment={'FIRST_VAR': 'first', 'SECOND_VAR': 'second'})
+        assert config == {'x': 'second'}
+        assert sorted(read_names) == ['FIRST_VAR', 'SECOND_VAR']
+
+        # Dropping the shadowed-but-read mandatory variable breaks the replay.
+        with pytest.raises(ConfigSubstitutionException):
+            ConfigFactory.parse_string(
+                content, environment={'SECOND_VAR': 'second'})
+
+    def test_environment_manifest_includes_self_reference_read(self):
+        # The self reference is read from the environment even though the key
+        # ends up removed (optional + missing); its name must be recorded. The
+        # self-referencing key is kept last to avoid the unrelated upstream
+        # OrderedDict-mutation bug when a non-last key is removed.
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            """
+            other = ${OTHER_VAR}
+            SELF_VAR = ${?SELF_VAR}
+            """,
+            environment={'OTHER_VAR': 'other-value'})
+        assert config == {'other': 'other-value'}
+        assert sorted(read_names) == ['OTHER_VAR', 'SELF_VAR']
+
+    def test_environment_manifest_replay_in_empty_environment(self):
+        content = """
+        ingest {
+            site_code = ${SITE_CODE}
+            partition = ${PARTITION_DT}
+            optional_col = ${?OPTIONAL_COLUMN}
+        }
+        shadowed {
+            a = ${CHAIN_VAR}
+            a = 42
+        }
+        SELF_VAR = ${?SELF_VAR}
+        """
+        original_view = {
+            'SITE_CODE': 'cn-north-1',
+            'PARTITION_DT': '2026-11-11',
+            'CHAIN_VAR': 'shadowed',
+            'SELF_VAR': 'self-value',
+            'NOISE': 'never read',
+        }
+        original, manifest = ConfigFactory.parse_string_with_manifest(
+            content, environment=dict(original_view))
+
+        # Rebuild a view containing only the names that were actually read.
+        replay_view = {name: original_view[name] for name in manifest
+                       if name in original_view}
+        replayed, replay_manifest = ConfigFactory.parse_string_with_manifest(
+            content, environment=replay_view)
+
+        assert replayed.as_plain_ordered_dict() == original.as_plain_ordered_dict()
+        assert sorted(replay_manifest) == sorted(manifest)
+        assert 'optional_col' not in replayed['ingest']
+        assert 'NOISE' not in manifest and 'CHAIN_VAR' not in manifest
+
+    def test_parallel_parses_use_isolated_environment_views(self):
+        content = """
+        site = ${SITE_CODE}
+        partition = ${PARTITION_DT}
+        optional_col = ${?OPTIONAL_COLUMN}
+        """
+
+        def worker(site_code):
+            view = {
+                'SITE_CODE': site_code,
+                'PARTITION_DT': '2026-11-11',
+            }
+            config, read_names = ConfigFactory.parse_string_with_manifest(
+                content, environment=view)
+            return config['site'], config['partition'], sorted(read_names)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(worker, ['site-a', 'site-b']))
+
+        assert results == [
+            ('site-a', '2026-11-11', ['OPTIONAL_COLUMN', 'PARTITION_DT', 'SITE_CODE']),
+            ('site-b', '2026-11-11', ['OPTIONAL_COLUMN', 'PARTITION_DT', 'SITE_CODE']),
+        ]
+
+    def test_environment_manifest_does_not_cross_contaminate_parses(self):
+        first, first_names = ConfigFactory.parse_string_with_manifest(
+            "a = ${FIRST_VAR}\n", environment={'FIRST_VAR': 'one'})
+        second, second_names = ConfigFactory.parse_string_with_manifest(
+            "b = ${SECOND_VAR}\n", environment={'SECOND_VAR': 'two'})
+        assert first == {'a': 'one'} and second == {'b': 'two'}
+        assert first_names == ['FIRST_VAR']
+        assert second_names == ['SECOND_VAR']
+
+    def test_explicit_environment_mandatory_missing_raises(self):
+        with pytest.raises(ConfigSubstitutionException):
+            ConfigFactory.parse_string(
+                "x = ${MANDATORY_MISSING}\n", environment={})
+
+    def test_parse_file_manifest_with_included_file(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            child_path = os.path.join(temp_dir, 'child.conf')
+            with open(child_path, 'w') as fdin:
+                fdin.write('child_code = ${SITE_CODE}\n'
+                           'child_opt = ${?CHILD_OPT}\n')
+            parent_path = os.path.join(temp_dir, 'parent.conf')
+            with open(parent_path, 'w') as fdin:
+                fdin.write('include "child.conf"\nroot_code = ${SITE_CODE}\n')
+
+            config, read_names = ConfigFactory.parse_file_with_manifest(
+                parent_path, environment={'SITE_CODE': 'cn-1'})
+
+            assert config['child_code'] == 'cn-1'
+            assert config['root_code'] == 'cn-1'
+            assert 'child_opt' not in config
+            assert sorted(read_names) == ['CHILD_OPT', 'SITE_CODE']
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @mock.patch.dict(os.environ, MANIFEST_ENV_VAR='from-process')
+    def test_parse_string_manifest_defaults_to_process_environment(self):
+        config, read_names = ConfigFactory.parse_string_with_manifest(
+            "x = ${MANIFEST_ENV_VAR}\ny = ${?MISSING_OPT}\n")
+        assert config == {'x': 'from-process'}
+        assert sorted(read_names) == ['MANIFEST_ENV_VAR', 'MISSING_OPT']
 
     def test_unicode_dict_key(self):
         input_string = u"""
