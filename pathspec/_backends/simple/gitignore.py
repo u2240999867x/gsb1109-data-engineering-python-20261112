@@ -6,6 +6,7 @@ Its contents and structure are likely to change.
 """
 
 from collections.abc import (
+	Iterable,
 	Sequence)
 from typing import (
 	Optional)  # Replaced by `X | None` in 3.10.
@@ -64,6 +65,27 @@ class SimpleGiBackend(SimplePsBackend):
 		"""
 		return self._match(file, check_ancestors=True)
 
+	def _iter_patterns(self, file: str) -> Iterable[tuple[int, RegexPattern]]:
+		"""
+		Yield the enumerated patterns to evaluate for *file* in the same order as
+		:attr:`self._patterns`.
+
+		When the literal index is enabled this yields only the candidates that can
+		mathematically match *file*; otherwise it yields every enumerated pattern.
+		The regular expression remains the authority for the actual decision, so
+		the result is identical to the unindexed scan.
+		"""
+		index = self._index
+		if index is None:
+			return self._patterns
+
+		candidates, _checks = index.candidates(file)
+		if self._is_reversed:
+			# The index returns ascending spec order; the enumerated list is
+			# reversed so the first match takes precedence.
+			return reversed(candidates)
+		return candidates
+
 	def _match(
 		self, file: str, check_ancestors: bool,
 	) -> tuple[Optional[bool], Optional[int]]:
@@ -73,6 +95,7 @@ class SimpleGiBackend(SimplePsBackend):
 		:meth:`_match_ancestor` for why it can be skipped.
 		"""
 		is_reversed = self._is_reversed
+		index = self._index
 
 		# Resolve the ancestor directory and the file separately: a file negation
 		# only applies while no ancestor directory is excluded.
@@ -81,7 +104,9 @@ class SimpleGiBackend(SimplePsBackend):
 		file_include: Optional[bool] = None
 		file_index: Optional[int] = None
 
-		for index, pattern in self._patterns:
+		regex_calls = 0
+		for pattern_index, pattern in self._iter_patterns(file):
+			regex_calls += 1
 			if (
 				(include := pattern.include) is not None
 				and (match := pattern.match_file(file)) is not None
@@ -102,15 +127,18 @@ class SimpleGiBackend(SimplePsBackend):
 
 					if is_ancestor and (dir_include is None or not is_reversed):
 						dir_include = include
-						dir_index = index
+						dir_index = pattern_index
 
 					if is_self and (file_include is None or not is_reversed):
 						file_include = include
-						file_index = index
+						file_index = pattern_index
 				elif file_include is None or not is_reversed:
 					# Pattern matched by a file pattern.
 					file_include = include
-					file_index = index
+					file_index = pattern_index
+
+		if index is not None:
+			index.note_regex_calls(regex_calls)
 
 		if check_ancestors and (dir_include is not None or file_include is not None):
 			# Neither file nor directory negations override an excluded ancestor.
@@ -148,4 +176,3 @@ class SimpleGiBackend(SimplePsBackend):
 			index = file.find('/', index + 1)
 
 		return None
-

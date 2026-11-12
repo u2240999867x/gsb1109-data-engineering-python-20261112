@@ -22,6 +22,10 @@ New features:
 - `Issue #126`_: `.iter_tree_files()` / `.iter_tree_entries()` methods now have a *subdir* parameter to allow traversing only part of the tree.
 - `GitIgnoreBasicPattern` and `GitIgnoreSpecPattern` now accept an `errors` argument to `__init__()` and `pattern_to_regex()` to control how invalid patterns are handled.
 
+Improvements:
+
+- The "simple" backends now build a literal prefix/suffix index over the compiled patterns. A single-file check only evaluates the wildcard rules and the literal rules whose directory prefix, path-component name, or suffix can match the path, instead of running every regular expression. Adding rules whose prefixes and suffixes are disjoint from a partition no longer increases the per-file candidate count beyond a constant; include/exclude decisions and the matched rule index are unchanged because the regular expression remains the authority.
+
 Bug fixes:
 
 - Hyperscan backend no longer fails on multibyte UTF-8 characters.

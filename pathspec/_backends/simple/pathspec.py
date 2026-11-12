@@ -21,6 +21,8 @@ from pathspec.util import (
 
 from .._utils import (
 	enumerate_patterns)
+from ._index import (
+	LiteralIndex)
 
 
 class SimplePsBackend(_Backend):
@@ -62,6 +64,21 @@ class SimplePsBackend(_Backend):
 		patterns.
 		"""
 
+		# The literal index is an exact, narrowing optimization over the linear
+		# scan. It is disabled on the explicit "no optimization" configuration so
+		# that forward/unfiltered evaluation stays available as a reference
+		# implementation (the test suite cross-checks the two against each other).
+		self._index_enabled: bool = not (no_filter or no_reverse)
+		"""
+		*_index_enabled* (:class:`bool`) is whether the literal index narrows the
+		patterns evaluated for each file.
+		"""
+
+		if self._index_enabled:
+			self._index: Optional[LiteralIndex] = LiteralIndex(self._patterns)
+		else:
+			self._index = None
+
 	@override
 	def match_file(self, file: str) -> tuple[Optional[bool], Optional[int]]:
 		"""
@@ -73,4 +90,19 @@ class SimplePsBackend(_Backend):
 		or :data:`None`), and the index of the last matched pattern (:class:`int` or
 		:data:`None`).
 		"""
-		return check_match_file(self._patterns, file, self._is_reversed)
+		index = self._index
+		if index is None or not self._is_reversed:
+			return check_match_file(self._patterns, file, self._is_reversed)
+
+		# The index returns candidates in ascending spec order; this backend
+		# evaluates highest-index-first so the first match wins.
+		candidates, _checks = index.candidates(file)
+		regex_calls = 0
+		for pattern_index, pattern in reversed(candidates):
+			regex_calls += 1
+			if pattern.include is not None and pattern.match_file(file) is not None:
+				index.note_regex_calls(regex_calls)
+				return pattern.include, pattern_index
+
+		index.note_regex_calls(regex_calls)
+		return None, None
