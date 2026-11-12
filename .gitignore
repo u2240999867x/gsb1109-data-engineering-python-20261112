@@ -1,0 +1,17 @@
+# global
+*.pyc
+*.pyo
+*~
+__pycache__
+
+# /
+/.coverage
+/.mypy_cache
+/.ruff_cache
+/.tox
+/.venv
+/build
+/coverage
+/dist
+/distribute-*.egg
+/python_stdnum.egg-info
