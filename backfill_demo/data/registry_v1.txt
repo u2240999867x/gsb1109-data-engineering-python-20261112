@@ -1,0 +1,5 @@
+# mini IBAN registry, snapshot v1
+# format: country code | BBAN structure (n=numeric, a=alpha, c=alphanumeric)
+BE|3!n7!n2!n
+DE|8!n10!n
+XK|4!n10!n2!n

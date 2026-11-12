@@ -1,0 +1,9 @@
+# Belgian bank directory v2 (range|bank name)
+# 400-499 still covered by the first row, so a bank-435 account is unaffected;
+# the change elsewhere (new 750 entrant, renumbered postal block) alters the
+# file hash but not the verdict for that account
+000-499|BELGIUS-BNP UNIVERSAL BANK
+500-699|KBC GROUP
+750-750|NEW PAYMENTS LTD
+900-996|POSTAL GIRO
+997-998|TREASURY OFFICE

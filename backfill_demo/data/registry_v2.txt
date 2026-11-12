@@ -1,0 +1,5 @@
+# mini IBAN registry, snapshot v2
+# structure rows are byte-identical to v1: the generic layer does not change
+BE|3!n7!n2!n
+DE|8!n10!n
+XK|4!n10!n2!n
