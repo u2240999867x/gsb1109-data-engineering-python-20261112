@@ -373,6 +373,24 @@ def fix_and_explain(
     """
     if config is None:
         config = TextFixerConfig()
+    return _fix_and_explain_impl(text, config, kwargs)
+
+
+def _fix_and_explain_impl(
+    text: str,
+    config: TextFixerConfig,
+    kwargs: dict[str, Any],
+    recorder: Callable[[str, str, str], None] | None = None,
+) -> ExplainedText:
+    """
+    The shared implementation of :func:`fix_and_explain`.
+
+    If `recorder` is provided, it is called as ``recorder(stage, before, after)``
+    each time a step of the pipeline changes the text, where `stage` is the
+    name of the fixer that ran. This lets callers (such as `ftfy.evidence`)
+    observe the intermediate states of the text without changing how the
+    pipeline itself behaves.
+    """
     if isinstance(text, bytes):
         raise UnicodeError(BYTES_ERROR_TEXT)
     config = _config_from_kwargs(config, kwargs)
@@ -389,15 +407,21 @@ def fix_and_explain(
     while True:
         origtext = text
 
+        before = text
         text = _try_fix("unescape_html", text, config, steps)
+        if recorder is not None and text != before:
+            recorder("unescape_html", before, text)
 
         if config.fix_encoding:
+            before = text
             if steps is None:
                 text = fix_encoding(text)
             else:
                 text, encoding_steps = fix_encoding_and_explain(text, config)
                 if encoding_steps is not None:
                     steps.extend(encoding_steps)
+            if recorder is not None and text != before:
+                recorder("fix_encoding", before, text)
 
         for fixer in [
             "fix_c1_controls",
@@ -409,13 +433,19 @@ def fix_and_explain(
             "remove_terminal_escapes",
             "remove_control_chars",
         ]:
+            before = text
             text = _try_fix(fixer, text, config, steps)
+            if recorder is not None and text != before:
+                recorder(fixer, before, text)
 
         if config.normalization is not None:
+            before = text
             fixed = unicodedata.normalize(config.normalization, text)
             if steps is not None and fixed != text:
                 steps.append(ExplanationStep("normalize", config.normalization))
             text = fixed
+            if recorder is not None and text != before:
+                recorder("normalization", before, text)
 
         if text == origtext:
             return ExplainedText(text, steps)
@@ -610,6 +640,27 @@ def fix_text_segment(text: str, config: TextFixerConfig | None = None, **kwargs:
     config = _config_from_kwargs(config, kwargs)
     fixed, _explan = fix_and_explain(text, config)
     return fixed
+
+
+def fix_text_with_evidence(
+    text: str, config: TextFixerConfig | None = None, **kwargs: Any
+) -> ftfy.evidence.FixEvidence:
+    """
+    Fix text as a single segment (like :func:`fix_and_explain`), and also
+    collect traceable evidence for the mojibake heuristics that fired along
+    the way.
+
+    Returns a :class:`ftfy.evidence.FixEvidence`, whose `text` is the same
+    fixed text that :func:`fix_text_segment` would return, whose `score` is
+    the badness of the input, and whose `stages` show, before and after each
+    fix that was applied, which signals matched and which code points of the
+    original input they trace back to.
+
+    See the `ftfy.evidence` module for details.
+    """
+    from ftfy.evidence import fix_text_with_evidence as _fix_text_with_evidence
+
+    return _fix_text_with_evidence(text, config, **kwargs)
 
 
 def fix_file(

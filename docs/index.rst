@@ -28,6 +28,7 @@ ftfy is a heuristic that was designed (not machine-learned) by Robyn Speer. If y
    detect
    avoid
    heuristic
+   evidence
    bad_encodings
    cli
    cite

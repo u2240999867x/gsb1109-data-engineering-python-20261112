@@ -12,8 +12,9 @@ to be mojibake than intended strings, such as lowercase accented letters
 followed immediately by currency symbols.
 """
 
-import warnings
 import re
+import warnings
+from typing import NamedTuple
 
 
 # There are only a few hundred characters that occur in known UTF-8 mojibake, and we can
@@ -267,124 +268,143 @@ MOJIBAKE_CATEGORIES = {
 # Another regular expression, which detects sequences that look more specifically
 # like UTF-8 mojibake, appears in chardata.py.
 #
-# This is a verbose regular expression, with whitespace added for somewhat more
-# readability. Remember that the only spaces that count as literal spaces in this
-# expression are ones inside character classes (square brackets).
+# The rules are expressed as a list of (name, pattern) pairs, so that each
+# match can be traced back to the rule -- the "signal" -- that produced it.
+# Joining the patterns with "|" reproduces the alternation that ftfy has
+# always used, in the same order, so the overall matches are unchanged.
+#
+# The patterns are verbose regular expressions, with whitespace added for
+# somewhat more readability. Remember that the only spaces that count as
+# literal spaces in these expressions are ones inside character classes
+# (square brackets).
 
-BADNESS_RE = re.compile(
-    r"""
-    [{c1}]
-    |
-    [{bad}{lower_accented}{upper_accented}{box}{start_punctuation}{end_punctuation}{currency}{numeric}{law}] [{bad}]
-    |
-    [a-zA-Z] [{lower_common}{upper_common}] [{bad}]
-    |
-    [{bad}] [{lower_accented}{upper_accented}{box}{start_punctuation}{end_punctuation}{currency}{numeric}{law}]
-    |
-    [{lower_accented}{lower_common}{box}{end_punctuation}{currency}{numeric}] [{upper_accented}]
-    |
-    [{box}{end_punctuation}{currency}{numeric}] [{lower_accented}]
-    |
-    [{lower_accented}{box}{end_punctuation}] [{currency}]
-    |
-    \s [{upper_accented}] [{currency}]
-    |
-    [{upper_accented}{box}] [{numeric}{law}]
-    |
-    [{lower_accented}{upper_accented}{box}{currency}{end_punctuation}] [{start_punctuation}] [{numeric}]
-    |
-    [{lower_accented}{upper_accented}{currency}{numeric}{box}{law}] [{end_punctuation}] [{start_punctuation}]
-    |
-    [{currency}{numeric}{box}] [{start_punctuation}]
-    |
-    [a-z] [{upper_accented}] [{start_punctuation}{currency}]
-    |
-    [{box}] [{kaomoji}]
-    |
-    [{lower_accented}{upper_accented}{currency}{numeric}{start_punctuation}{end_punctuation}{law}] [{box}]
-    |
-    [{box}] [{end_punctuation}]
-    |
-    [{lower_accented}{upper_accented}] [{start_punctuation}{end_punctuation}] \w
-    |
-
+_BADNESS_RULES: list[tuple[str, str]] = [
+    ("c1_control", r"[{c1}]"),
+    (
+        "symbol_then_bad",
+        r"[{bad}{lower_accented}{upper_accented}{box}{start_punctuation}{end_punctuation}{currency}{numeric}{law}] [{bad}]",
+    ),
+    ("latin_common_bad", r"[a-zA-Z] [{lower_common}{upper_common}] [{bad}]"),
+    (
+        "bad_then_symbol",
+        r"[{bad}] [{bad}{lower_accented}{upper_accented}{box}{start_punctuation}{end_punctuation}{currency}{numeric}{law}]",
+    ),
+    (
+        "lower_then_upper_accented",
+        r"[{lower_accented}{lower_common}{box}{end_punctuation}{currency}{numeric}] [{upper_accented}]",
+    ),
+    (
+        "symbol_then_lower_accented",
+        r"[{box}{end_punctuation}{currency}{numeric}] [{lower_accented}]",
+    ),
+    ("accented_then_currency", r"[{lower_accented}{box}{end_punctuation}] [{currency}]"),
+    ("space_capital_currency", r"\s [{upper_accented}] [{currency}]"),
+    ("capital_then_numeric", r"[{upper_accented}{box}] [{numeric}{law}]"),
+    (
+        "symbol_start_numeric",
+        r"[{lower_accented}{upper_accented}{box}{currency}{end_punctuation}] [{start_punctuation}] [{numeric}]",
+    ),
+    (
+        "end_then_start_punctuation",
+        r"[{lower_accented}{upper_accented}{currency}{numeric}{box}{law}] [{end_punctuation}] [{start_punctuation}]",
+    ),
+    ("symbol_then_start_punctuation", r"[{currency}{numeric}{box}] [{start_punctuation}]"),
+    ("lower_capital_punctuation", r"[a-z] [{upper_accented}] [{start_punctuation}{currency}]"),
+    ("box_then_kaomoji", r"[{box}] [{kaomoji}]"),
+    (
+        "symbol_then_box",
+        r"[{lower_accented}{upper_accented}{currency}{numeric}{start_punctuation}{end_punctuation}{law}] [{box}]",
+    ),
+    ("box_then_end_punctuation", r"[{box}] [{end_punctuation}]"),
+    (
+        "accented_punctuation_word",
+        r"[{lower_accented}{upper_accented}] [{start_punctuation}{end_punctuation}] \w",
+    ),
     # The ligature œ when not followed by an unaccented Latin letter
-    [Œœ][^A-Za-z]
-    |
-
+    ("oe_ligature_context", r"[Œœ][^A-Za-z]"),
     # Degree signs after capital letters
-    [{upper_accented}]°
-    |
-
+    ("capital_then_degree", r"[{upper_accented}]°"),
     # Common Windows-1252 2-character mojibake that isn't covered by the cases above
-    [ÂÃÎÐ][€œŠš¢£Ÿž\xa0\xad®©°·»{start_punctuation}{end_punctuation}–—´]
-    |
-    × [²³]
-    |
+    (
+        "windows_1252_pair",
+        r"[ÂÃÎÐ][€œŠš¢£Ÿž\xa0\xad®©°·»{start_punctuation}{end_punctuation}–—´]",
+    ),
+    ("multiplication_superscript", r"× [²³]"),
     # Windows-1252 mojibake of Arabic words needs to include the 'common' characters.
     # To compensate, we require four characters to be matched.
-      [ØÙ] [{common}{currency}{bad}{numeric}{start_punctuation}ŸŠ®°µ»]
-      [ØÙ] [{common}{currency}{bad}{numeric}{start_punctuation}ŸŠ®°µ»]
-    |
-
+    (
+        "arabic_windows_1252",
+        r"[ØÙ] [{common}{currency}{bad}{numeric}{start_punctuation}ŸŠ®°µ»]"
+        r" [ØÙ] [{common}{currency}{bad}{numeric}{start_punctuation}ŸŠ®°µ»]",
+    ),
     # Windows-1252 mojibake that starts 3-character sequences for some South Asian
     # alphabets
-    à[²µ¹¼½¾]
-    |
-
+    ("south_asian_windows_1252", r"à[²µ¹¼½¾]"),
     # MacRoman mojibake that isn't covered by the cases above
-    √[±∂†≠®™´≤≥¥µø]
-    |
-    ≈[°¢]
-    |
-    ‚Ä[ìîïòôúùû†°¢π]
-    |
-    ‚[âó][àä°ê]
-    |
-
+    ("macroman_math", r"√[±∂†≠®™´≤≥¥µø]"),
+    ("macroman_almost", r"≈[°¢]"),
+    ("windows_1252_utf8_triple", r"‚Ä[ìîïòôúùû†°¢π]"),
+    ("windows_1252_utf8_triple_low", r"‚[âó][àä°ê]"),
     # Windows-1251 mojibake of characters in the U+2000 range
-    вЂ
-    |
-
+    ("windows_1251_u2000", r"вЂ"),
     # Windows-1251 mojibake of Latin-1 characters and/or the Cyrillic alphabet.
     # Because the 2-character sequences involved here may be common, we require
     # seeing a 3-character sequence.
-    [ВГРС][{c1}{bad}{start_punctuation}{end_punctuation}{currency}°µ][ВГРС]
-    |
+    (
+        "windows_1251_triple",
+        r"[ВГРС][{c1}{bad}{start_punctuation}{end_punctuation}{currency}°µ][ВГРС]",
+    ),
     # A distinctive five-character sequence of Cyrillic letters, which can be
     # Windows-1251 mojibake on top of Latin-1 mojibake of Windows-1252 characters.
     # Require a Latin letter nearby.
-    ГўВЂВ.[A-Za-z ]
-    |
-
+    ("windows_1251_latin1_chain", r"ГўВЂВ.[A-Za-z ]"),
     # Windows-1252 encodings of 'à' and 'á', as well as \xa0 itself
-    Ã[\xa0¡]
-    |
-    [a-z]\s?[ÃÂ][ ]
-    |
-    ^[ÃÂ][ ]
-    |
-
+    ("a0_mojibake", r"Ã[\xa0¡]"),
+    ("trailing_a_mojibake", r"[a-z]\s?[ÃÂ][ ]"),
+    ("leading_a_mojibake", r"^[ÃÂ][ ]"),
     # Cases where Â precedes a character as an encoding of exactly the same
     # character, and the character is common enough
-    [a-z.,?!{end_punctuation}] Â [ {start_punctuation}{end_punctuation}]
-    |
-
-    # Windows-1253 mojibake of characters in the U+2000 range
-    β€[™\xa0Ά\xad®°]
-    |
-
-    # Windows-1253 mojibake of Latin-1 characters and/or the Greek alphabet
-    [ΒΓΞΟ][{c1}{bad}{start_punctuation}{end_punctuation}{currency}°][ΒΓΞΟ]
-    |
-
-    # Windows-1257 mojibake of characters in the U+2000 range
-    ā€
-    """.format(
-        **MOJIBAKE_CATEGORIES
+    (
+        "a_around_punctuation",
+        r"[a-z.,?!{end_punctuation}] Â [ {start_punctuation}{end_punctuation}]",
     ),
-    re.VERBOSE,
-)
+    # Windows-1253 mojibake of characters in the U+2000 range
+    ("windows_1253_u2000", r"β€[™\xa0Ά\xad®°]"),
+    # Windows-1253 mojibake of Latin-1 characters and/or the Greek alphabet
+    (
+        "windows_1253_triple",
+        r"[ΒΓΞΟ][{c1}{bad}{start_punctuation}{end_punctuation}{currency}°][ΒΓΞΟ]",
+    ),
+    # Windows-1257 mojibake of characters in the U+2000 range
+    ("windows_1257_u2000", r"ā€"),
+]
+
+
+def _badness_pattern() -> str:
+    """
+    Combine the badness rules into a single alternation, substituting in the
+    character categories. This is the same pattern ftfy has always used.
+    """
+    return "|".join(pattern for _name, pattern in _BADNESS_RULES).format(
+        **MOJIBAKE_CATEGORIES
+    )
+
+
+def _badness_signal_pattern() -> str:
+    """
+    Combine the badness rules into an alternation where each rule is wrapped
+    in a named group, so that a match can be attributed to a particular rule.
+    """
+    return "|".join(
+        f"(?P<{name}>{pattern})" for name, pattern in _BADNESS_RULES
+    ).format(**MOJIBAKE_CATEGORIES)
+
+
+BADNESS_RE = re.compile(_badness_pattern(), re.VERBOSE)
+
+# A variant of BADNESS_RE that attributes each match to the rule (signal)
+# that produced it. It matches exactly the same text as BADNESS_RE.
+BADNESS_SIGNAL_RE = re.compile(_badness_signal_pattern(), re.VERBOSE)
 
 
 def sequence_weirdness(text: str) -> int:
@@ -407,6 +427,49 @@ def badness(text: str) -> int:
     seems to be mojibake.
     """
     return len(BADNESS_RE.findall(text))
+
+
+class SignalHit(NamedTuple):
+    """
+    A single piece of evidence for the badness heuristic: one match of one
+    of the rules (signals) that make up :data:`BADNESS_RE`.
+
+    - `signal`: the name of the rule that matched, such as "c1_control"
+    - `span`: the (start, end) code point offsets of the match in the text
+    - `matched`: the matched text itself
+    - `score`: this match's contribution to the badness score (always 1,
+      because :func:`badness` counts matches)
+    """
+
+    signal: str
+    span: tuple[int, int]
+    matched: str
+    score: int
+
+
+def signal_hits(text: str) -> list[SignalHit]:
+    """
+    Get the evidence behind :func:`badness`: a list of the signals that
+    matched this text, in the order they were found, with the code point
+    offsets where each one matched.
+
+    The number of hits is the same as the result of ``badness(text)``, and
+    each hit's `score` of 1 is its contribution to that total, so the hits
+    add up to a complete explanation of the score.
+    """
+    hits = []
+    for match in BADNESS_SIGNAL_RE.finditer(text):
+        signal = match.lastgroup
+        assert signal is not None  # every alternative is a named group
+        hits.append(
+            SignalHit(
+                signal=signal,
+                span=match.span(),
+                matched=match.group(0),
+                score=1,
+            )
+        )
+    return hits
 
 
 def is_bad(text: str) -> bool:

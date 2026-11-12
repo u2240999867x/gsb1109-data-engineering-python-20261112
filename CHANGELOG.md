@@ -1,3 +1,15 @@
+## Unreleased
+
+- Added `ftfy.evidence`, an opt-in module that provides traceable evidence for
+  the badness heuristic. `ftfy.fix_text_with_evidence()` fixes text and, at
+  each stage of the pipeline, records which heuristic signals matched and maps
+  them back to the code points of the original input -- including through
+  fixes that merge, expand, or move characters. Mappings that can't be
+  resolved uniquely keep all candidate ranges and are marked ambiguous.
+  Collecting evidence does not change the fixed text or the scores.
+- Added `ftfy.badness.signal_hits()`, which lists the individual signals
+  (named rules) whose counts add up to `ftfy.badness.badness()`.
+
 ## Version 6.3.1 (October 25, 2024)
 
 - Fixed `license` metadata field in pyproject.toml.
