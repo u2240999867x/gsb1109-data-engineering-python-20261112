@@ -2,6 +2,7 @@
 import unittest
 import warnings
 import sys
+import copy
 
 from collections import OrderedDict
 import jsonmerge
@@ -2390,6 +2391,149 @@ class TestGetSchema(unittest.TestCase):
 
         self.assertEqual(schema2, expected)
 
+    def test_get_schema_does_not_modify_schema(self):
+        # A get_schema() call must not rewrite the schema used for
+        # merging. A subsequent merge() on the same Merger must still
+        # apply the strategies from the original schema.
+
+        schema = {
+            "properties": {
+                "test": {
+                    "mergeStrategy": "arrayMergeById",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/refitem"
+                    }
+                }
+            },
+            "definitions": {
+                "refitem": {
+                    "type": "object",
+                    "properties": {
+                        "field1": {
+                            "type": "string",
+                            "mergeStrategy": "version"
+                        }
+                    }
+                }
+            }
+        }
+
+        original = copy.deepcopy(schema)
+
+        merger = jsonmerge.Merger(schema)
+        merger.get_schema()
+
+        self.assertEqual(schema, original)
+
+        base = merger.merge(None, {'test': [{'id': 'a', 'field1': 'x'}]})
+        base = merger.merge(base, {'test': [{'id': 'a', 'field1': 'y'}]})
+
+        self.assertEqual(base, {'test': [{'id': 'a', 'field1':
+                                          [{'value': 'x'}, {'value': 'y'}]}]})
+
+    def test_get_schema_output_does_not_share_state(self):
+        # The schema returned by get_schema() must not share mutable
+        # state with the schema given to the Merger. Modifying the
+        # returned schema must not affect later derivations or merges.
+
+        schema = {
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "mergeStrategy": "version"
+                }
+            }
+        }
+
+        original = copy.deepcopy(schema)
+
+        merger = jsonmerge.Merger(schema)
+        schema2 = merger.get_schema()
+
+        schema2['properties']['name']['items']['properties']['value']['type'] = 'number'
+
+        self.assertEqual(schema, original)
+        self.assertEqual(merger.get_schema()['properties']['name']
+                         ['items']['properties']['value']['type'], 'string')
+
+    def test_get_schema_is_repeatable(self):
+        # Repeated get_schema() calls on the same Merger must return
+        # equal schemas.
+
+        schema = {
+            "properties": {
+                "a": {"$ref": "#/definitions/item"},
+                "b": {"$ref": "#/definitions/item"},
+            },
+            "definitions": {
+                "item": {
+                    "type": "string",
+                    "mergeStrategy": "version"
+                }
+            }
+        }
+
+        merger = jsonmerge.Merger(schema)
+
+        schema2 = merger.get_schema()
+        schema3 = merger.get_schema()
+
+        self.assertEqual(schema2, schema3)
+
+    def test_get_schema_interleaved_mergers(self):
+        # Two mergers can cache different schemas under the same URI.
+        # Interleaved get_schema() calls must each resolve the URI
+        # against their own Merger's cache.
+
+        schema_1 = {
+            'id': 'http://example.com/root_1.json',
+            'properties': {
+                'col': {'$ref': 'shared.json#/definitions/col'}
+            }
+        }
+
+        schema_2 = copy.deepcopy(schema_1)
+        schema_2['id'] = 'http://example.com/root_2.json'
+
+        cached_1 = {
+            'id': 'http://example.com/shared.json',
+            'definitions': {
+                'col': {
+                    'type': 'string',
+                    'mergeStrategy': 'version',
+                    'mergeOptions': {'limit': 1}
+                }
+            }
+        }
+
+        cached_2 = copy.deepcopy(cached_1)
+        cached_2['definitions']['col']['mergeOptions']['limit'] = 2
+
+        merger_1 = jsonmerge.Merger(schema_1)
+        merger_1.cache_schema(cached_1)
+
+        merger_2 = jsonmerge.Merger(schema_2)
+        merger_2.cache_schema(cached_2)
+
+        merger_1.get_schema()
+        merger_2.get_schema()
+
+        # cached external schemas must not be rewritten by derivation
+        self.assertEqual(cached_1['definitions']['col']
+                         ['mergeOptions']['limit'], 1)
+        self.assertEqual(cached_2['definitions']['col']
+                         ['mergeOptions']['limit'], 2)
+
+        # merging still uses each Merger's own cached version
+        base_1 = merger_1.merge(None, {'col': 'a'})
+        base_1 = merger_1.merge(base_1, {'col': 'b'})
+        self.assertEqual(base_1, {'col': [{'value': 'b'}]})
+
+        base_2 = merger_2.merge(None, {'col': 'a'})
+        base_2 = merger_2.merge(base_2, {'col': 'b'})
+        self.assertEqual(base_2, {'col': [{'value': 'a'}, {'value': 'b'}]})
+
     def test_merge_by_id_with_sort(self):
         schema = {
             "properties": {
@@ -2527,7 +2671,43 @@ class TestGetSchema(unittest.TestCase):
         merger = jsonmerge.Merger(schema)
         schema2 = merger.get_schema()
 
-        self.assertEqual(schema2, schema)
+        expected = {
+            "oneOf": [
+                {
+                    "type": "array"
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#"
+                    }
+                },
+                {
+                    "type": "string"
+                },
+            ]
+        }
+
+        self.assertEqual(schema2, expected)
+
+        # get_schema() must not modify the schema given to the Merger.
+        self.assertEqual(schema, {
+            "oneOf": [
+                {
+                    "type": "array",
+                    "mergeStrategy": "append"
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#"
+                    }
+                },
+                {
+                    "type": "string"
+                },
+            ]
+        })
 
     def test_oneof_toplevel(self):
 

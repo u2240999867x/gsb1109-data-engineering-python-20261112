@@ -1,5 +1,6 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
 from collections import OrderedDict
+import copy
 from jsonmerge.jsonvalue import JSONValue
 from jsonmerge.resolver import LocalRefResolver
 from jsonmerge import strategies
@@ -21,10 +22,12 @@ class Walk(object):
             descenders.AnyOfAllOf,
     ]
 
-    def __init__(self, merger, merge_options):
+    def __init__(self, merger, merge_options, resolver=None):
         self.merger = merger
         self.merge_options = merge_options
-        self.resolver = merger.validator.resolver
+        if resolver is None:
+            resolver = merger.validator.resolver
+        self.resolver = resolver
         self.lvl = -1
 
         self.descenders = [ cls() for cls in self.DESCENDERS ]
@@ -352,6 +355,10 @@ class Merger(object):
 
         Returns a JSON schema for documents returned by the
         merge() method.
+
+        The schema given to the Merger is not modified by this
+        method and the returned schema shares no mutable state with
+        it.
         """
 
         if merge_options is None:
@@ -364,10 +371,29 @@ class Merger(object):
                     DeprecationWarning, 2)
             merge_options['version'] = { 'metadataSchema': meta }
 
-        schema = JSONValue(self.schema)
+        # Derivation rewrites parts of the schema in place (e.g. targets
+        # of local $refs are replaced with their derived schemas). Work
+        # on a detached copy so that the schema given to us is never
+        # modified and the returned schema doesn't share mutable state
+        # with it.
+        schema = copy.deepcopy(self.schema)
 
-        walk = WalkSchema(self, merge_options)
-        return walk.descend(schema).val
+        # Resolve references against the detached copy, so that the
+        # rewrites done during derivation don't touch the original
+        # schema. External schemas cached with cache_schema() are shared
+        # with the Merger's resolver, but are never rewritten by
+        # derivation.
+        if hasattr(self.validator, 'ID_OF'):
+            resolver = LocalRefResolver.from_schema(schema, id_of=self.validator.ID_OF)
+        else:
+            # jsonschema<3.0.0
+            resolver = LocalRefResolver.from_schema(schema)
+
+        resolver.store.update(self.validator.resolver.store)
+        resolver.store[resolver.base_uri] = schema
+
+        walk = WalkSchema(self, merge_options, resolver=resolver)
+        return walk.descend(JSONValue(schema)).val
 
 def merge(base, head, schema={}):
     """Merge two JSON documents using strategies defined in schema.
