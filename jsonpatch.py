@@ -37,6 +37,7 @@ import collections
 import copy
 import functools
 import json
+import re
 from collections.abc import (Mapping, MutableMapping, MutableSequence,
                              Sequence)
 from difflib import SequenceMatcher
@@ -1752,3 +1753,772 @@ def _to_existing_last(pointer, doc):
         raise JsonPointerException("invalid array index '{0}'".format(part))
 
     return subobj, part
+
+
+# --- Patch compaction -------------------------------------------------------
+
+# Only the four RFC 6902 operations without a 'from' member take part in
+# compaction; 'move' and 'copy' read a second location and can shift array
+# elements themselves, so windows containing them are left untouched.
+_COMPACTABLE_OPS = frozenset(('add', 'replace', 'remove', 'test'))
+
+# RFC 6901 array-index reference tokens: "0" or digits without a leading zero.
+_ARRAY_INDEX_RE = re.compile(r'0|[1-9][0-9]*\Z')
+
+# Upper bounds keeping the exhaustive covering and state search bounded.
+_MAX_ARRAY_LENGTH = 12
+
+
+class CompactPatch:
+    """The result of :func:`compact_patch`.
+
+    :attr operations: the kept operations, in their original order. Each is a
+                      deep copy of an input operation and is unchanged, so
+                      kept operations still carry their original semantics.
+    :attr indices: the index of each kept operation in the input patch, in the
+                   same order as :attr operations.
+    :attr windows: the windows into which the input patch was split. Each
+                   entry is ``(kind, start, stop, indices)`` for the input
+                   positions ``range(start, stop)``; ``kind`` is ``'compact'``
+                   for a window that was compacted and ``'passthrough'`` for a
+                   window longer than the caller's limit, whose operations were
+                   kept unchanged.
+    """
+
+    __slots__ = ('operations', 'indices', 'windows')
+
+    def __init__(self, operations, indices, windows):
+        self.operations = list(operations)
+        self.indices = tuple(indices)
+        self.windows = tuple(windows)
+
+    def as_patch(self, pointer_cls=JsonPointer):
+        """The kept operations as a :class:`JsonPatch`."""
+        return JsonPatch(copy.deepcopy(self.operations),
+                         pointer_cls=pointer_cls)
+
+    def to_string(self, dumps=None):
+        """The kept operations as a JSON string."""
+        return self.as_patch().to_string(dumps)
+
+    def __len__(self):
+        return len(self.operations)
+
+    def __iter__(self):
+        return iter(self.operations)
+
+    def __eq__(self, other):
+        if not isinstance(other, CompactPatch):
+            return NotImplemented
+        return (self.operations == other.operations and
+                self.indices == other.indices and
+                self.windows == other.windows)
+
+    def __repr__(self):
+        return 'CompactPatch(indices={0!r}, windows={1!r})'.format(
+            self.indices, self.windows)
+
+
+class PatchSchema:
+    """Structure of the JSON documents a patch may be applied to.
+
+    A schema describes the required object members, array length ranges and
+    value types of every allowed starting document. The compactor exhaustively
+    exercises documents covering these alternatives, so equivalence holds for
+    every conforming document, not only for the sampled ones. Use the factory
+    class methods to build one; without a schema the structure is inferred
+    from the paths and values of the patch itself.
+    """
+
+    class _Spec:
+        __slots__ = ()
+
+    class _Any(_Spec):
+        __slots__ = ()
+
+    class _Value(_Spec):
+        __slots__ = ('types',)
+
+        def __init__(self, types):
+            self.types = tuple(types)
+
+    class _Object(_Spec):
+        __slots__ = ('required', 'optional')
+
+        def __init__(self, required, optional):
+            self.required = dict(required)
+            self.optional = dict(optional)
+
+    class _Array(_Spec):
+        __slots__ = ('item', 'min_length', 'max_length')
+
+        def __init__(self, item, min_length, max_length):
+            self.item = item
+            self.min_length = min_length
+            self.max_length = max_length
+
+    @classmethod
+    def any(cls):
+        """An unconstrained value: object, array or any scalar."""
+        return cls._Any()
+
+    @classmethod
+    def value(cls, *types):
+        """A scalar of one of the JSON types ``'null'``, ``'boolean'``,
+        ``'integer'``, ``'number'`` or ``'string'``."""
+        allowed = ('null', 'boolean', 'integer', 'number', 'string')
+        unknown = [name for name in types if name not in allowed]
+        if unknown:
+            raise ValueError('unknown JSON type(s): {0}'.format(unknown))
+        if not types:
+            raise ValueError('at least one value type is required')
+        return cls._Value(types)
+
+    @classmethod
+    def object(cls, required=None, optional=None):
+        """An object with ``required`` members and, independently, members in
+        ``optional`` that may be absent. Both map member names to schemas."""
+        return cls._Object(required or {}, optional or {})
+
+    @classmethod
+    def array(cls, item, min_length=0, max_length=None):
+        """An array of items described by ``item``, with a length in
+        ``[min_length, max_length]``. An open ``max_length`` is capped while
+        the covering documents are enumerated."""
+        if min_length < 0:
+            raise ValueError('min_length must not be negative')
+        if max_length is None:
+            max_length = max(min_length, _MAX_ARRAY_LENGTH)
+        if max_length < min_length:
+            raise ValueError('max_length must not be below min_length')
+        return cls._Array(item, min_length, max_length)
+
+
+_SCALAR_REPRESENTATIVES = {
+    'null': (None,),
+    'boolean': (False, True),
+    'integer': (0, 1),
+    'number': (0.0, 1.5),
+    'string': ('', 'x'),
+}
+
+
+class _CompactionBudgetExceeded(Exception):
+    """Raised when exhaustively covering the allowed documents would need more
+    than the bounded number of representative documents. The window is then
+    left unchanged, so compaction never relies on an incomplete covering."""
+
+
+# Hard limits on the finite covering set and the dynamic-program frontier.
+_MAX_COVERING_DOCS = 200
+_MAX_FRONTIER_STATES = 20000
+
+
+def _is_index_token(part):
+    return _ARRAY_INDEX_RE.fullmatch(part) is not None
+
+
+def _filler_for(spec):
+    """A single conforming value for ``spec``."""
+    if isinstance(spec, PatchSchema._Any):
+        return None
+    if isinstance(spec, PatchSchema._Value):
+        return _SCALAR_REPRESENTATIVES[spec.types[0]][0]
+    if isinstance(spec, PatchSchema._Object):
+        return {key: _filler_for(child)
+                for key, child in sorted(spec.required.items())}
+    if isinstance(spec, PatchSchema._Array):
+        return [_filler_for(spec.item) for _ in range(spec.min_length)]
+    raise TypeError('not a schema spec: {0!r}'.format(spec))
+
+
+def _spec_allows_value(spec, value):
+    """Whether a concrete JSON value is compatible with a (type-level) spec."""
+    if isinstance(spec, PatchSchema._Any):
+        return True
+    if isinstance(spec, PatchSchema._Object):
+        return isinstance(value, Mapping) and all(
+            key in value for key in spec.required)
+    if isinstance(spec, PatchSchema._Array):
+        return (isinstance(value, MutableSequence) and
+                spec.min_length <= len(value) <= spec.max_length)
+    if isinstance(spec, PatchSchema._Value):
+        checks = {
+            'null': lambda v: v is None,
+            'boolean': lambda v: isinstance(v, bool),
+            'integer': lambda v: isinstance(v, int) and not isinstance(v, bool),
+            'number': lambda v: isinstance(v, (int, float)) and
+            not isinstance(v, bool),
+            'string': lambda v: isinstance(v, str),
+        }
+        return any(checks[name](value) for name in spec.types)
+    raise TypeError('not a schema spec: {0!r}'.format(spec))
+
+
+def _build_path_trie(operations, pointer_cls):
+    """A trie (nested dicts keyed by unescaped parts) of every touched path."""
+    root = {}
+    for operation in operations:
+        parts = _pointer_parts(operation['path'], pointer_cls)
+        node = root
+        for part in parts:
+            node = node.setdefault(part, {})
+    return root
+
+
+def _trie_indices(node):
+    """The distinct array-index tokens used directly under a trie node."""
+    return sorted({int(token) for token in node if _is_index_token(token)})
+
+
+def _array_lengths(spec, node):
+    """Every length at which an array's behavior can differ for the indices
+    the operations use: the schema bounds and the points around each index."""
+    thresholds = {spec.min_length, spec.max_length,
+                  min(spec.max_length, spec.min_length + 1)}
+    for index in _trie_indices(node):
+        for length in (index, index + 1):
+            if spec.min_length <= length <= spec.max_length:
+                thresholds.add(length)
+    # appending with '-' works at every length, so needs no extra threshold
+    return sorted(thresholds)
+
+
+def _scalar_representatives(spec, literals):
+    """Concrete scalars covering the JSON types of ``spec`` and, for ``test``
+    operations, equality and inequality with every tested literal."""
+    values = []
+    seen = set()
+
+    def add(value):
+        if not _spec_allows_value(spec, value):
+            return
+        key = _canonical(value)
+        if key not in seen:
+            seen.add(key)
+            values.append(value)
+
+    if isinstance(spec, PatchSchema._Any):
+        for reps in _SCALAR_REPRESENTATIVES.values():
+            for value in reps:
+                add(value)
+        type_names = list(_SCALAR_REPRESENTATIVES)
+    else:
+        for name in spec.types:
+            for value in _SCALAR_REPRESENTATIVES[name]:
+                add(value)
+        type_names = list(spec.types)
+    for literal in literals:
+        add(literal)  # the equal-to-literal class, when type-compatible
+    # a value of each allowed type guaranteed different from every literal
+    if literals:
+        distinct = {
+            'null': [None],
+            'boolean': [False, True],
+            'integer': [735127, -904213],
+            'number': [735127.5, -904213.25],
+            'string': ['~jsonpatch-distinct', 'other-distinct-value'],
+        }
+        for name in type_names:
+            for candidate in distinct[name]:
+                if all(not _json_equal(candidate, literal)
+                       for literal in literals):
+                    add(candidate)
+                    break
+    return values
+
+
+def _enumerate_documents(spec, node, whole_literals, budget, prefix=()):
+    """Concrete values at a trie node, covering every behavioral partition.
+
+    ``whole_literals`` are the values of ``test`` operations whose path lands
+    exactly on this node, so a test compares the whole value here against them.
+    The recursion covers container type, optional member presence, array length
+    buckets and tested-value equality classes; ``budget`` bounds the result and
+    raises once the covering set would be larger.
+    """
+    budget['count'] = budget.get('count', 0) + 1
+    if budget['count'] > _MAX_COVERING_DOCS:
+        raise _CompactionBudgetExceeded
+
+    # Whole-value tests pin the equality class of the entire subtree.
+    literal_options = [value for value in whole_literals
+                       if _spec_allows_value(spec, value)]
+
+    if isinstance(spec, PatchSchema._Value):
+        return _scalar_representatives(spec, whole_literals)
+
+    if isinstance(spec, PatchSchema._Any):
+        # Without a structure the value may be a scalar, object or array; all
+        # three readings are enumerated, since a whole-value 'test' or the
+        # failure to resolve a deeper path distinguishes them.
+        documents = []
+        seen = set()
+
+        def emit(value):
+            key = _canonical(value)
+            if key not in seen:
+                seen.add(key)
+                documents.append(value)
+                if len(documents) > _MAX_COVERING_DOCS:
+                    raise _CompactionBudgetExceeded
+
+        for value in _scalar_representatives(spec, whole_literals):
+            emit(value)
+        for literal in literal_options:
+            emit(copy.deepcopy(literal))
+        if node:
+            for value in _enumerate_objects(spec, node, literal_options,
+                                            budget, prefix):
+                emit(value)
+            for value in _enumerate_arrays(spec, node, literal_options,
+                                           budget, prefix):
+                emit(value)
+        return documents
+
+    if isinstance(spec, PatchSchema._Object):
+        return _enumerate_objects(spec, node, literal_options, budget, prefix)
+
+    if isinstance(spec, PatchSchema._Array):
+        return _enumerate_arrays(spec, node, literal_options, budget, prefix)
+
+    return [_filler_for(spec)]
+
+
+def _child_spec(spec, token):
+    """The schema a trie child is governed by under ``spec``."""
+    if isinstance(spec, PatchSchema._Object):
+        child = spec.required.get(token, spec.optional.get(token))
+        return child if child is not None else PatchSchema.any()
+    if isinstance(spec, PatchSchema._Array):
+        return spec.item
+    return PatchSchema.any()
+
+
+def _enumerate_objects(spec, node, literal_options, budget, prefix):
+    # An object's members can have any string name, including one that looks
+    # like an array index (e.g. the member "0"), so every trie token is a
+    # member name here; only an inferred structure also treats them as indices.
+    named = sorted(node)
+    options_by_key = []
+    for token in named:
+        child_node = node[token]
+        child_spec = _child_spec(spec, token)
+        child_literals = budget['test_literals'].get(
+            prefix + (token,), ())
+        variants = _enumerate_documents(
+            child_spec, child_node, child_literals, budget,
+            prefix + (token,))
+        if isinstance(spec, PatchSchema._Object) and token in spec.required:
+            options_by_key.append([(token, value) for value in variants])
+        else:
+            # optional (or inferred) member: present in each variant, or absent
+            options_by_key.append(
+                [None] + [(token, value) for value in variants])
+
+    required_base = {}
+    if isinstance(spec, PatchSchema._Object):
+        required_base = {key: _filler_for(child)
+                         for key, child in sorted(spec.required.items())
+                         if key not in named}
+
+    documents = []
+    seen = set()
+
+    def emit(obj):
+        key = _canonical(obj)
+        if key not in seen:
+            seen.add(key)
+            documents.append(obj)
+            if len(documents) > _MAX_COVERING_DOCS:
+                raise _CompactionBudgetExceeded
+
+    combinations = [()]
+    for options in options_by_key:
+        combinations = [combo + (option,) for combo in combinations
+                        for option in options]
+        if len(combinations) > _MAX_COVERING_DOCS:
+            raise _CompactionBudgetExceeded
+
+    for combo in combinations:
+        obj = dict(required_base)
+        for entry in combo:
+            if entry is not None:
+                token, value = entry
+                obj[token] = copy.deepcopy(value)
+        emit(copy.deepcopy(obj))
+
+    # whole-subtree test literals that are themselves objects
+    for literal in literal_options:
+        if isinstance(literal, Mapping):
+            emit(copy.deepcopy(literal))
+    return documents
+
+
+def _enumerate_arrays(spec, node, literal_options, budget, prefix):
+    if isinstance(spec, PatchSchema._Array):
+        lengths = _array_lengths(spec, node)
+        item_spec = spec.item
+    else:
+        # inferred array under _Any: cover short lengths around the indices
+        max_index = max(_trie_indices(node), default=0)
+        lengths = sorted(set(range(0, min(max_index + 2,
+                                          _MAX_ARRAY_LENGTH) + 1)))
+        item_spec = PatchSchema.any()
+
+    documents = []
+    seen = set()
+
+    def emit(array):
+        key = _canonical(array)
+        if key not in seen:
+            seen.add(key)
+            documents.append(array)
+            if len(documents) > _MAX_COVERING_DOCS:
+                raise _CompactionBudgetExceeded
+
+    indexed = _trie_indices(node)
+    child_variants = {}
+    for index in indexed:
+        token = str(index)
+        child_literals = budget['test_literals'].get(
+            prefix + (token,), ())
+        child_variants[index] = _enumerate_documents(
+            item_spec, node[token], child_literals, budget,
+            prefix + (token,))
+
+    for length in lengths:
+        base = [_filler_for(item_spec) for _ in range(length)]
+        present = [index for index in indexed if index < length]
+        choices = [()]
+        for index in present:
+            choices = [combo + (value,)
+                       for combo in choices
+                       for value in child_variants[index]]
+            if len(choices) > _MAX_COVERING_DOCS:
+                raise _CompactionBudgetExceeded
+        for combo in choices:
+            array = list(base)
+            for index, value in zip(present, combo):
+                array[index] = copy.deepcopy(value)
+            emit(array)
+
+    for literal in literal_options:
+        if isinstance(literal, MutableSequence):
+            emit(copy.deepcopy(literal))
+    return documents
+
+
+def _collect_test_literals(operations, pointer_cls):
+    """The distinct tested values at each exact path (unescaped parts)."""
+    literals = collections.OrderedDict()
+    for operation in operations:
+        if operation.get('op') == 'test' and 'value' in operation:
+            parts = _pointer_parts(operation['path'], pointer_cls)
+            bucket = literals.setdefault(parts, [])
+            value = copy.deepcopy(operation['value'])
+            if all(not _json_equal(value, existing) for existing in bucket):
+                bucket.append(value)
+    return {parts: tuple(values) for parts, values in literals.items()}
+
+
+def _covering_documents(schema, operations, pointer_cls):
+    """The finite, behavior-complete set of allowed starting documents.
+
+    Two conforming documents that agree on container type at every touched
+    path, presence of every referenced member, array-length bucket relative to
+    every referenced index and tested-value equality class behave identically
+    through these four operations, so covering every such partition is enough.
+    """
+    if schema is None:
+        schema = PatchSchema.any()
+    trie = _build_path_trie(operations, pointer_cls)
+    test_literals = _collect_test_literals(operations, pointer_cls)
+    budget = {'test_literals': test_literals, 'count': 0}
+    root_literals = test_literals.get((), ())
+    documents = _enumerate_documents(schema, trie, root_literals, budget)
+    return documents
+
+
+def _canonical(doc):
+    """A canonical JSON serialization, distinguishing JSON types (so 1 and
+    true differ) and ignoring object member order."""
+    return json.dumps(doc, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=False)
+
+
+def _pointer_parts(path, pointer_cls):
+    return tuple(pointer_cls(path).parts)
+
+
+class _TokenPool:
+    """Interns documents by their canonical JSON, so equal documents share a
+    state token across the whole dynamic program."""
+
+    def __init__(self):
+        self._token_by_canon = {}
+        self._doc_by_token = {}
+        self._fail_by_key = {}
+        self._next = 0
+        self._next_fail = 0
+
+    def document_token(self, doc):
+        canon = _canonical(doc)
+        token = self._token_by_canon.get(canon)
+        if token is None:
+            token = self._next
+            self._next += 1
+            self._token_by_canon[canon] = token
+            self._doc_by_token[token] = doc
+        return token
+
+    def document(self, token):
+        return self._doc_by_token[token]
+
+    def failure_token(self, original_index, before_token):
+        key = (original_index, before_token)
+        token = self._fail_by_key.get(key)
+        if token is None:
+            token = self._next_fail
+            self._next_fail += 1
+            self._fail_by_key[key] = token
+        return token
+
+
+def _apply_vector(operation, original_index, vector, pool, op_objects):
+    """Applies one kept operation to every document that has not failed.
+
+    A state entry is ``('d', token)`` for a document or ``('f', token)`` for a
+    document on which an earlier kept operation already failed; failed states
+    are frozen, together with the document and the failing original index.
+    """
+    result = []
+    for kind, token in vector:
+        if kind == 'f':
+            result.append((kind, token))
+            continue
+        doc = copy.deepcopy(pool.document(token))
+        try:
+            # root operations return a new value rather than mutating doc
+            doc = op_objects[original_index].apply(doc)
+        except (JsonPatchException, JsonPointerException):
+            result.append(('f', pool.failure_token(original_index, token)))
+        else:
+            result.append(('d', pool.document_token(doc)))
+    return tuple(result)
+
+
+def _is_under_open_structure(schema, parts):
+    """Whether any container along ``parts`` has an unknown/open structure.
+
+    A ``_Any`` container may be an object with members the schema does not
+    name, so an ``add`` or ``replace`` landing in it can overwrite content that
+    cannot be enumerated. Closed objects (``PatchSchema.object``) name every
+    allowed member and arrays address items by position, so they are safe.
+    """
+    current = schema
+    for part in parts:
+        if isinstance(current, PatchSchema._Any):
+            return True
+        if isinstance(current, PatchSchema._Object):
+            current = current.required.get(
+                part, current.optional.get(part, PatchSchema.any()))
+        elif isinstance(current, PatchSchema._Array):
+            current = current.item
+        else:
+            return True
+    return isinstance(current, PatchSchema._Any)
+
+
+def _compact_window(window, offset, schema, pointer_cls):
+    """Shortest subsequence of ``window`` with identical observable behavior
+    on every document allowed by ``schema``.
+
+    ``offset`` is the original index of ``window[0]`` in the full patch.
+    Returns the original indices (within the full patch) that are kept, or
+    ``None`` when the finite covering set or state space is too large to prove
+    equivalence, in which case the caller keeps the window unchanged.
+    """
+    try:
+        documents = _covering_documents(schema, window, pointer_cls)
+    except _CompactionBudgetExceeded:
+        return None
+
+    op_objects = [JsonPatch([operation], pointer_cls=pointer_cls)._ops[0]
+                  for operation in window]
+    # Operations whose removal cannot be proven safe are forced to stay:
+    # - any operation on the whole document (path ""), which replaces it and
+    #   can erase content the schema does not describe;
+    # - add/replace in an open/unknown structure, whose object can carry
+    #   members the schema does not name;
+    # - add/replace carrying a container value, which overwrites a whole
+    #   subtree and can erase unnamed members or elements. Scalar field
+    #   corrections in closed structures remain compactable.
+    # test and remove never overwrite other members, so they are not forced.
+    mandatory = set()
+    for index, operation in enumerate(window):
+        parts = _pointer_parts(operation['path'], pointer_cls)
+        value = operation.get('value')
+        is_container_value = isinstance(value, (Mapping, MutableSequence))
+        if not parts or (
+                operation['op'] in ('add', 'replace') and (
+                    _is_under_open_structure(schema, parts) or
+                    is_container_value)):
+            mandatory.add(index)
+    pool = _TokenPool()
+    initial = tuple(('d', pool.document_token(copy.deepcopy(doc)))
+                    for doc in documents)
+
+    def target_vector():
+        vector = initial
+        for index in range(len(window)):
+            vector = _apply_vector(window[index], index, vector, pool,
+                                   op_objects)
+        return tuple(vector)
+
+    target = target_vector()
+
+    # state vector -> shortest kept positions reaching it
+    frontier = {initial: ()}
+    try:
+        for index in range(len(window)):
+            if index in mandatory:
+                updated = {}
+            else:
+                updated = dict(frontier)  # skipping this operation keeps states
+            for state, kept in frontier.items():
+                next_state = _apply_vector(window[index], index, state, pool,
+                                           op_objects)
+                candidate = kept + (index,)
+                current = updated.get(next_state)
+                if current is None or len(candidate) < len(current) or (
+                        len(candidate) == len(current) and candidate < current):
+                    updated[next_state] = candidate
+            if len(updated) > _MAX_FRONTIER_STATES:
+                return None
+            frontier = updated
+    except _CompactionBudgetExceeded:
+        return None
+
+    kept = frontier.get(target)
+    if kept is None:  # pragma: no cover - the full window always reaches it
+        return None
+    return tuple(offset + index for index in kept)
+
+
+def _compactable_windows(patch):
+    """Splits a patch into maximal runs of add/replace/remove/test operations."""
+    start = None
+    for index, operation in enumerate(patch):
+        if operation.get('op') in _COMPACTABLE_OPS:
+            if start is None:
+                start = index
+        elif start is not None:
+            yield start, index
+            start = None
+    if start is not None:
+        yield start, len(patch)
+
+
+def compact_patch(patch, schema=None, max_window=32, pointer_cls=JsonPointer):
+    """Removes operations from a JSON patch without changing its behavior.
+
+    The patch is split into maximal windows of consecutive ``add``,
+    ``replace``, ``remove`` and ``test`` operations; each window is reduced to
+    the shortest subsequence of its original operations that behaves
+    identically on every starting document allowed by ``schema``. Kept
+    operations are copied unchanged and stay associated with their original
+    position through :attr:`CompactPatch.indices`.
+
+    Two patches behave identically when, for every allowed starting document,
+    either both succeed with equal result documents, or both fail on the same
+    original operation with equal documents immediately before that failure.
+    Array index shifts and escaped member names (``~0``, ``~1``) are handled
+    through the JSON Pointer parts of every path.
+
+    :param patch: A :class:`JsonPatch` or an iterable of operation dicts. Only
+                  ``add``, ``replace``, ``remove`` and ``test`` operations are
+                  compacted; ``move`` and ``copy`` separate windows.
+    :param schema: A :class:`PatchSchema` of the allowed starting documents, or
+                   ``None`` to infer the structure from the patch.
+    :param max_window: The largest window to compact. Longer windows are kept
+                       unchanged and reported as ``'passthrough'``.
+    :param pointer_cls: JSON pointer class used to parse the paths.
+
+    :return: A :class:`CompactPatch`.
+
+    Without a schema every document (including one on which an operation
+    fails) has to stay possible, so only redundancies provable on their own,
+    such as a repeated test, are removed:
+
+    >>> patch = [
+    ...     {'op': 'test', 'path': '/a', 'value': 1},
+    ...     {'op': 'test', 'path': '/a', 'value': 1},
+    ...     {'op': 'replace', 'path': '/a', 'value': 2},
+    ... ]
+    >>> result = compact_patch(patch)
+    >>> result.indices
+    (0, 2)
+    >>> result.operations == [patch[0], patch[2]]
+    True
+
+    A schema makes more structure known. When ``/a`` is guaranteed to exist,
+    an ``add`` that a later ``replace`` overwrites is redundant:
+
+    >>> schema = PatchSchema.object(
+    ...     required={'a': PatchSchema.value('integer')})
+    >>> patch = [
+    ...     {'op': 'add', 'path': '/a', 'value': 1},
+    ...     {'op': 'replace', 'path': '/a', 'value': 2},
+    ... ]
+    >>> compact_patch(patch, schema=schema).indices
+    (1,)
+    """
+    if isinstance(patch, JsonPatch):
+        pointer_cls = patch.pointer_cls
+        operations = copy.deepcopy(patch.patch)
+    else:
+        operations = JsonPatch(patch, pointer_cls=pointer_cls).patch
+        operations = copy.deepcopy(operations)
+
+    if not isinstance(max_window, int) or isinstance(max_window, bool) or \
+            max_window < 1:
+        raise ValueError('max_window must be a positive integer')
+
+    kept_operations = []
+    kept_indices = []
+    windows = []
+
+    for start, stop in _compactable_windows(operations):
+        window = operations[start:stop]
+        if stop - start > max_window:
+            kept = tuple(range(start, stop))
+            windows.append(('passthrough', start, stop, kept))
+        else:
+            reduced = _compact_window(window, start, schema, pointer_cls)
+            if reduced is None:
+                # the exhaustive covering did not fit the bounds: stay safe
+                kept = tuple(range(start, stop))
+                windows.append(('passthrough', start, stop, kept))
+            else:
+                kept = reduced
+                windows.append(('compact', start, stop, kept))
+        for index in kept:
+            kept_operations.append(copy.deepcopy(operations[index]))
+            kept_indices.append(index)
+
+    # operations outside compactable windows (move/copy) are always kept
+    window_positions = set()
+    for start, stop in _compactable_windows(operations):
+        window_positions.update(range(start, stop))
+    for index, operation in enumerate(operations):
+        if index not in window_positions:
+            kept_operations.append(copy.deepcopy(operation))
+            kept_indices.append(index)
+
+    order = sorted(range(len(kept_operations)), key=kept_indices.__getitem__)
+    kept_operations = [kept_operations[pos] for pos in order]
+    kept_indices = [kept_indices[pos] for pos in order]
+
+    return CompactPatch(kept_operations, kept_indices,
+                        sorted(windows, key=lambda entry: entry[1]))

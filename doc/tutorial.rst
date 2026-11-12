@@ -564,3 +564,64 @@ diff behavior. ``optimization=False`` disables moves but retains suffix
 detection. ``generate_test_ops=True`` also tests the original string before
 appending. As with custom operations, ``in_place=True, atomic=True`` uses
 the existing copy-based rollback fallback.
+
+Compacting a patch
+-------------------
+
+A correction run can contain operations that later operations make
+redundant. ``compact_patch`` removes them while keeping the behavior of the
+patch identical: for every starting document, the compacted patch either
+succeeds with the same result document, or fails on the same original
+operation with the same document immediately before that failure.
+
+Only consecutive ``add``, ``replace``, ``remove`` and ``test`` operations are
+compacted; ``move`` and ``copy`` separate compaction windows and are always
+kept. The kept operations are unchanged copies, and ``indices`` records the
+position each one had in the input patch, so a receiver that isolates rows by
+the first failing operation still sees the original index.
+
+.. code-block:: python
+
+    >>> import jsonpatch
+    >>> patch = [
+    ...     {'op': 'test', 'path': '/a', 'value': 1},
+    ...     {'op': 'test', 'path': '/a', 'value': 1},
+    ...     {'op': 'replace', 'path': '/a', 'value': 2},
+    ... ]
+    >>> result = jsonpatch.compact_patch(patch)
+    >>> result.indices
+    (0, 2)
+    >>> result.operations
+    [{'op': 'test', 'path': '/a', 'value': 1}, {'op': 'replace', 'path': '/a', 'value': 2}]
+
+A ``PatchSchema`` describes the allowed starting documents: required object
+members, optional members, array length ranges and value types. The more
+structure is known, the more operations can be proven redundant. With no
+schema, every document (including one on which an operation fails) stays
+possible, so only redundancies that hold unconditionally are removed.
+
+.. code-block:: python
+
+    >>> schema = jsonpatch.PatchSchema.object(
+    ...     required={'a': jsonpatch.PatchSchema.value('integer')})
+    >>> patch = [
+    ...     {'op': 'add', 'path': '/a', 'value': 1},
+    ...     {'op': 'replace', 'path': '/a', 'value': 2},
+    ... ]
+    >>> jsonpatch.compact_patch(patch, schema=schema).indices
+    (1,)
+
+Array index shifts are taken into account, and escaped member names such as
+``a~1b`` (the member ``a/b``) are handled through their unescaped JSON Pointer
+parts, so two similarly written but distinct paths are never merged.
+
+``max_window`` bounds the windows that are examined; longer windows are kept
+unchanged and reported as ``'passthrough'`` in ``windows``, together with the
+``'compact'`` windows and the index ranges they cover:
+
+.. code-block:: python
+
+    >>> result = jsonpatch.compact_patch(patch, schema=schema, max_window=1)
+    >>> [entry[0] for entry in result.windows]
+    ['passthrough']
+

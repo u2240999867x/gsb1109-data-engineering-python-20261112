@@ -56,6 +56,60 @@ def make_patch(
 def path_split(path: str, pointer_cls: type[JsonPointer] = ...) -> tuple[str, ...]: ...
 def path_join(parts: Iterable[str | int], pointer_cls: type[JsonPointer] = ...) -> str: ...
 
+class PatchSchema:
+    class _Spec: ...
+    class _Any(_Spec): ...
+    class _Value(_Spec):
+        types: tuple[str, ...]
+    class _Object(_Spec):
+        required: dict[str, _Spec]
+        optional: dict[str, _Spec]
+    class _Array(_Spec):
+        item: _Spec
+        min_length: int
+        max_length: int
+    @classmethod
+    def any(cls) -> _Any: ...
+    @classmethod
+    def value(cls, *types: str) -> _Value: ...
+    @classmethod
+    def object(
+        cls,
+        required: Mapping[str, _Spec] | None = ...,
+        optional: Mapping[str, _Spec] | None = ...,
+    ) -> _Object: ...
+    @classmethod
+    def array(
+        cls,
+        item: _Spec,
+        min_length: int = ...,
+        max_length: int | None = ...,
+    ) -> _Array: ...
+
+class CompactPatch:
+    operations: list[dict[str, Any]]
+    indices: tuple[int, ...]
+    windows: tuple[tuple[str, int, int, tuple[int, ...]], ...]
+    def __init__(
+        self,
+        operations: Iterable[_Operation],
+        indices: Iterable[int],
+        windows: Iterable[tuple[str, int, int, tuple[int, ...]]],
+    ) -> None: ...
+    def as_patch(self, pointer_cls: type[JsonPointer] = ...) -> JsonPatch: ...
+    def to_string(self, dumps: Callable[[Any], str] | None = ...) -> str: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[dict[str, Any]]: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __repr__(self) -> str: ...
+
+def compact_patch(
+    patch: JsonPatch | Iterable[_Operation],
+    schema: PatchSchema._Spec | None = ...,
+    max_window: int = ...,
+    pointer_cls: type[JsonPointer] = ...,
+) -> CompactPatch: ...
+
 class PatchOperation:
     pointer_cls: type[JsonPointer]
     location: str

@@ -569,6 +569,91 @@ class JsonPatchProperties(unittest.TestCase):
         self.assertEqual(hash(patch), hash(other))
 
 
+compactable_operations = operations  # defined above, filtered at use sites
+
+
+def _run_patch(operations, doc):
+    """The successful result, or ('fail', failing index, document before)."""
+    current = copy.deepcopy(doc)
+    for index, operation in enumerate(operations):
+        before = copy.deepcopy(current)
+        try:
+            current = jsonpatch.apply_patch(current, [operation])
+        except (jsonpatch.JsonPatchException, JsonPointerException):
+            return 'fail', index, before
+    return 'ok', current
+
+
+def _assert_same_behavior(testcase, operations, result, doc):
+    full = _run_patch(operations, doc)
+    compact = _run_patch(result.operations, doc)
+    testcase.assertEqual(full[0], compact[0])
+    if full[0] == 'ok':
+        assert_json_equal(full[1], compact[1])
+    else:
+        # the compact failure maps back to the same original operation, and
+        # the document immediately before the failure is identical
+        testcase.assertEqual(full[1], result.indices[compact[1]])
+        assert_json_equal(full[2], compact[2])
+
+
+@st.composite
+def compactable_windows(draw, doc):
+    ops = draw(st.lists(
+        operations(doc).filter(
+            lambda op: op['op'] in ('add', 'replace', 'remove', 'test')),
+        max_size=6))
+    return ops
+
+
+class CompactionProperties(unittest.TestCase):
+
+    @given(st.data())
+    def test_compaction_preserves_behavior_without_schema(self, data):
+        doc = data.draw(json_docs)
+        operations_ = data.draw(compactable_windows(doc))
+        # without a schema the result must match on every document, not just
+        # the one the operations were drawn against
+        documents = [doc] + data.draw(st.lists(json_docs, min_size=6,
+                                               max_size=10))
+        result = jsonpatch.compact_patch(copy.deepcopy(operations_))
+        for candidate in documents:
+            _assert_same_behavior(self, operations_, result, candidate)
+
+    @given(st.data())
+    def test_kept_ops_are_unchanged_and_indexed(self, data):
+        doc = data.draw(json_docs)
+        operations_ = data.draw(compactable_windows(doc))
+        result = jsonpatch.compact_patch(copy.deepcopy(operations_))
+        self.assertEqual(result.operations,
+                         [operations_[i] for i in result.indices])
+        self.assertEqual(list(result.indices), sorted(result.indices))
+        self.assertTrue(all(0 <= i < len(operations_)
+                            for i in result.indices))
+        self.assertEqual(len(result), len(result.operations))
+
+    @given(st.data())
+    def test_compacted_patch_is_not_longer(self, data):
+        doc = data.draw(json_docs)
+        operations_ = data.draw(compactable_windows(doc))
+        result = jsonpatch.compact_patch(copy.deepcopy(operations_))
+        self.assertLessEqual(len(result), len(operations_))
+
+    @given(st.data())
+    def test_passthrough_windows_keep_every_operation(self, data):
+        doc = data.draw(json_docs)
+        operations_ = data.draw(compactable_windows(doc))
+        max_window = data.draw(st.integers(min_value=1, max_value=4))
+        result = jsonpatch.compact_patch(copy.deepcopy(operations_),
+                                         max_window=max_window)
+        for kind, start, stop, indices in result.windows:
+            if kind == 'passthrough':
+                self.assertEqual(indices, tuple(range(start, stop)))
+            else:
+                self.assertTrue(all(start <= i < stop for i in indices))
+        _assert_same_behavior(self, operations_, result, doc)
+
+
 class PatchOperationMachine(RuleBasedStateMachine):
     """ Applies valid operations one at a time to a document and compares
     each result with a direct implementation of RFC 6902.

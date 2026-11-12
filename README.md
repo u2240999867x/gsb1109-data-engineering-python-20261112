@@ -33,6 +33,27 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Patch compaction
+----------------
+`compact_patch()` removes operations that later operations make redundant,
+without changing the behavior of the patch. It works on windows of
+consecutive `add`, `replace`, `remove` and `test` operations; `move` and
+`copy` always separate windows and are kept. A `PatchSchema` describes the
+required object members, optional members, array length ranges and value
+types of the allowed starting documents; the more structure is known, the
+more operations can be proven redundant.
+
+For every allowed starting document the compacted patch either succeeds with
+the same result document, or fails on the same original operation with the
+same document immediately before that failure. Kept operations are unchanged
+and `CompactPatch.indices` records their original positions, so a receiver
+that isolates rows by the first failing operation still sees the original
+index. Windows longer than `max_window` are kept unchanged and reported as
+`passthrough` in `CompactPatch.windows`.
+
+See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.html#compacting-a-patch)
+for examples.
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as

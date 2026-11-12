@@ -4051,6 +4051,264 @@ class StandardAppendIsolationTests(unittest.TestCase):
                          {'message': 'canonical'})
 
 
+class CompactPatchTests(unittest.TestCase):
+
+    def outcome(self, operations, doc):
+        current = copy.deepcopy(doc)
+        for index, operation in enumerate(operations):
+            before = copy.deepcopy(current)
+            try:
+                current = jsonpatch.apply_patch(current, [operation])
+            except (jsonpatch.JsonPatchException,
+                    jsonpointer.JsonPointerException):
+                return 'fail', index, before
+        return 'ok', current
+
+    def assertEquivalent(self, patch, result, doc):
+        full = self.outcome(patch, doc)
+        compact = self.outcome(result.operations, doc)
+        self.assertEqual(full[0], compact[0])
+        if full[0] == 'ok':
+            self.assertEqual(full[1], compact[1])
+        else:
+            # the failing compact operation maps to the same original index,
+            # with the same document immediately before the failure
+            self.assertEqual(full[1], result.indices[compact[1]])
+            self.assertEqual(full[2], compact[2])
+
+    def check_documents(self, patch, result, schema, documents):
+        for doc in documents:
+            self.assertEquivalent(patch, result, doc)
+
+    def test_drops_add_overwritten_by_replace_with_object_schema(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'add', 'path': '/a', 'value': 1},
+            {'op': 'replace', 'path': '/a', 'value': 2},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(result.indices, (1,))
+        self.assertEqual(result.operations, [patch[1]])
+        self.check_documents(patch, result, schema,
+                             [{'a': 0}, {'a': 7}, {'a': -3}])
+
+    def test_kept_operations_keep_original_indices(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'add', 'path': '/a', 'value': 1},
+            {'op': 'add', 'path': '/b', 'value': 2},
+            {'op': 'replace', 'path': '/a', 'value': 3},
+            {'op': 'test', 'path': '/b', 'value': 2},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(result.operations,
+                         [patch[i] for i in result.indices])
+        self.assertTrue(all(result.operations[i] is not patch[result.indices[i]]
+                            for i in range(len(result))))
+
+    def test_failure_isolation_keeps_first_failure_and_document(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')},
+            optional={'b': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'test', 'path': '/a', 'value': 1},
+            {'op': 'replace', 'path': '/b', 'value': 2},
+            {'op': 'add', 'path': '/c', 'value': 3},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        # the failing test cannot be dropped, nor the order of the checks
+        self.assertIn(0, result.indices)
+        self.check_documents(patch, result, schema, [
+            {'a': 1}, {'a': 2}, {'a': 1, 'b': 7}, {'a': 1, 'b': 8, 'c': 9},
+        ])
+
+    def test_array_insert_then_remove_is_identity(self):
+        schema = jsonpatch.PatchSchema.object(required={
+            'xs': jsonpatch.PatchSchema.array(
+                jsonpatch.PatchSchema.value('integer'), 1, 4)})
+        patch = [
+            {'op': 'add', 'path': '/xs/0', 'value': 9},
+            {'op': 'remove', 'path': '/xs/0'},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(result.indices, ())
+        self.assertEqual(result.operations, [])
+        self.check_documents(patch, result, schema, [
+            {'xs': [1]}, {'xs': [1, 2]}, {'xs': [1, 2, 3, 4]},
+        ])
+
+    def test_array_index_shift_blocks_wrong_removal(self):
+        schema = jsonpatch.PatchSchema.object(required={
+            'xs': jsonpatch.PatchSchema.array(
+                jsonpatch.PatchSchema.value('integer'), 2, 4)})
+        # insert at 0, then remove index 1: the removal targets a shifted item,
+        # so neither operation can be dropped
+        patch = [
+            {'op': 'add', 'path': '/xs/0', 'value': 9},
+            {'op': 'remove', 'path': '/xs/1'},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(result.indices, (0, 1))
+        self.check_documents(patch, result, schema, [
+            {'xs': [1, 2]}, {'xs': [1, 2, 3]},
+        ])
+
+    def test_escaped_member_names_are_distinguished(self):
+        schema = jsonpatch.PatchSchema.object()
+        patch = [
+            {'op': 'add', 'path': '/a~1b', 'value': 1},
+            {'op': 'replace', 'path': '/a~1b', 'value': 2},
+            {'op': 'test', 'path': '/a~0b', 'value': 1},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.check_documents(patch, result, schema, [
+            {}, {'a/b': 5}, {'a~b': 1}, {'a/b': 2, 'a~b': 1},
+        ])
+
+    def test_numeric_token_can_be_object_member(self):
+        patch = [
+            {'op': 'test', 'path': '/0', 'value': 1},
+            {'op': 'add', 'path': '/0', 'value': 2},
+        ]
+        result = jsonpatch.compact_patch(patch)
+        # without a schema, '/0' may be an object member or an array index;
+        # both readings must keep the same behavior
+        self.check_documents(patch, result, None, [
+            {}, {'0': 1}, {'0': 2}, [], [1], [1, 2], [5],
+        ])
+
+    def test_root_replacement_is_taken_into_account(self):
+        schema = jsonpatch.PatchSchema.array(
+            jsonpatch.PatchSchema.value('integer'), 0, 3)
+        patch = [
+            {'op': 'add', 'path': '', 'value': False},
+            {'op': 'replace', 'path': '/0', 'value': 'x'},
+            {'op': 'add', 'path': '', 'value': {'k': 1}},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.check_documents(patch, result, schema,
+                             [[], [0], [0, 1], [0, 1, 2]])
+
+    def test_root_operation_is_always_kept_without_schema(self):
+        # the root add can erase members the patch never names, so dropping it
+        # would change documents such as {'': None}
+        patch = [
+            {'op': 'remove', 'path': '/-'},
+            {'op': 'add', 'path': '', 'value': {}},
+        ]
+        result = jsonpatch.compact_patch(patch)
+        self.assertEqual(result.indices, (0, 1))
+        self.check_documents(patch, result, None, [
+            {}, {'': None}, {'-': None, '': None}, None, [],
+        ])
+
+    def test_open_structure_add_is_kept_but_closed_is_compacted(self):
+        patch = [
+            {'op': 'add', 'path': '/x', 'value': 1},
+            {'op': 'replace', 'path': '/x', 'value': 2},
+        ]
+        # without a schema the object may carry extra members, so the add is
+        # not proven redundant
+        self.assertEqual(jsonpatch.compact_patch(patch).indices, (0, 1))
+        # a closed object names its member, making the add redundant
+        schema = jsonpatch.PatchSchema.object(
+            required={'x': jsonpatch.PatchSchema.value('integer')})
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(result.indices, (1,))
+        self.check_documents(patch, result, schema, [{'x': 0}, {'x': 9}])
+
+    def test_without_schema_only_safe_redundancies_are_removed(self):
+        patch = [
+            {'op': 'test', 'path': '/a', 'value': 1},
+            {'op': 'test', 'path': '/a', 'value': 1},
+            {'op': 'add', 'path': '/a', 'value': 2},
+        ]
+        result = jsonpatch.compact_patch(patch)
+        self.assertEqual(result.indices, (0, 2))
+        self.check_documents(patch, result, None, [
+            {}, {'a': 1}, {'a': 2}, {'a': [1]}, None, [],
+        ])
+
+    def test_move_and_copy_are_always_kept_and_split_windows(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'add', 'path': '/a', 'value': 1},
+            {'op': 'move', 'from': '/a', 'path': '/b'},
+            {'op': 'copy', 'from': '/b', 'path': '/c'},
+            {'op': 'replace', 'path': '/b', 'value': 3},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        self.assertIn(1, result.indices)
+        self.assertIn(2, result.indices)
+        # the add and the trailing replace form two compactable windows,
+        # separated by the move and copy operations
+        self.assertEqual([entry[0] for entry in result.windows],
+                         ['compact', 'compact'])
+        self.assertEqual([(entry[1], entry[2]) for entry in result.windows],
+                         [(0, 1), (3, 4)])
+        self.check_documents(patch, result, schema, [{'a': 9}])
+
+    def test_window_over_the_limit_is_passthrough(self):
+        patch = [
+            {'op': 'add', 'path': '/k{0}'.format(i), 'value': i}
+            for i in range(5)
+        ]
+        result = jsonpatch.compact_patch(patch, max_window=3)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result.indices, tuple(range(5)))
+        kind, start, stop, indices = result.windows[0]
+        self.assertEqual((kind, start, stop), ('passthrough', 0, 5))
+        self.assertEqual(indices, tuple(range(5)))
+
+    def test_empty_patch(self):
+        result = jsonpatch.compact_patch([])
+        self.assertEqual(result.indices, ())
+        self.assertEqual(result.operations, [])
+        self.assertEqual(result.windows, ())
+        self.assertEqual(len(result), 0)
+        self.assertEqual(list(result), [])
+
+    def test_result_round_trips_through_json_patch(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'add', 'path': '/a', 'value': 1},
+            {'op': 'replace', 'path': '/a', 'value': 2},
+        ]
+        result = jsonpatch.compact_patch(patch, schema=schema)
+        rebuilt = jsonpatch.JsonPatch.from_string(result.to_string())
+        self.assertEqual(rebuilt.patch, result.operations)
+        self.assertEqual(result.as_patch().apply({'a': 5}), {'a': 2})
+
+    def test_input_patch_is_not_modified(self):
+        schema = jsonpatch.PatchSchema.object(
+            required={'a': jsonpatch.PatchSchema.value('integer')})
+        patch = [
+            {'op': 'add', 'path': '/a', 'value': 1},
+            {'op': 'replace', 'path': '/a', 'value': 2},
+        ]
+        saved = copy.deepcopy(patch)
+        jsonpatch.compact_patch(patch, schema=schema)
+        self.assertEqual(patch, saved)
+
+    def test_invalid_max_window_is_rejected(self):
+        for bad in (0, -1, False, 1.5):
+            with self.assertRaises(ValueError):
+                jsonpatch.compact_patch([], max_window=bad)
+
+    def test_invalid_schema_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            jsonpatch.PatchSchema.value()
+        with self.assertRaises(ValueError):
+            jsonpatch.PatchSchema.value('array')
+        with self.assertRaises(ValueError):
+            jsonpatch.PatchSchema.array(
+                jsonpatch.PatchSchema.any(), min_length=3, max_length=2)
+
+
 def load_tests(loader, tests, pattern):
     """ Adds the doctests of jsonpatch to the tests of this module """
     tests.addTests(doctest.DocTestSuite(jsonpatch))
