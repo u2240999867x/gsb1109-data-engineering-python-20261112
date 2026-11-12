@@ -1,0 +1,1616 @@
+{
+  "oneof_sites": {
+    "#/config": [
+      "laptop",
+      "sensorNode"
+    ],
+    "#/firmware": [
+      "rollout",
+      "rollback"
+    ],
+    "#/sensors/*/payload": [
+      "tempPayload",
+      "geoPayload"
+    ]
+  },
+  "event_domain": [
+    {
+      "id": "E1_laptop_rollout_s1temp",
+      "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+      "input_valid": true,
+      "vin_errors": [],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E2_laptop_rollback_s1v2",
+      "desc": "config 同分支；firmware 切 rollback 分支；s1 同温度分支读数 v2；tag t2",
+      "input_valid": true,
+      "vin_errors": [],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          1
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E3_config_switch_sensor",
+      "desc": "config 从 laptop 切 sensorNode（顶层 oneOf 互斥分支切换）",
+      "input_valid": true,
+      "vin_errors": [],
+      "branches": {
+        "#/config": [
+          1
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E4_payload_switch_geo",
+      "desc": "s1 的 payload 从 temp 切 geo（数组项内嵌 oneOf 互斥分支切换）；tag t1",
+      "input_valid": true,
+      "vin_errors": [],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              1
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E5_sensor_item_without_id",
+      "desc": "含一个缺 sensorId 的数组项（V_in 非法；arrayMergeById 静默跳过该项）",
+      "input_valid": false,
+      "vin_errors": [
+        [
+          "sensors/0",
+          "'sensorId' is a required property"
+        ]
+      ],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          },
+          {
+            "path": "#/sensors/1/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E6_s1_missing_loc",
+      "desc": "s1 项缺必填 loc（V_in 非法；objectMerge 无输入校验）",
+      "input_valid": false,
+      "vin_errors": [
+        [
+          "sensors/0",
+          "'loc' is a required property"
+        ]
+      ],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E7_firmware_missing_build",
+      "desc": "firmware 值缺 rollout 必填 build（V_in 非法；version 照样入史）",
+      "input_valid": false,
+      "vin_errors": [
+        [
+          "firmware",
+          "{'phase': 'rollout'} is not valid under any of the given schemas"
+        ]
+      ],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E8_duplicate_tags",
+      "desc": "单个 head 内 tags 重复（V_in 违反 uniqueItems）",
+      "input_valid": false,
+      "vin_errors": [
+        [
+          "tags",
+          "['t1', 't1'] has non-unique elements"
+        ]
+      ],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          0
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": null
+    },
+    {
+      "id": "E9_metadata_blank_override",
+      "desc": "合法事件；本次 merge 把 version metadata 覆盖为空（reading 历史字段漂移）；tag t1 制造跨事件重复",
+      "input_valid": true,
+      "vin_errors": [],
+      "branches": {
+        "#/config": [
+          0
+        ],
+        "#/firmware": [
+          1
+        ],
+        "#/sensors/*/payload": [
+          {
+            "path": "#/sensors/0/payload",
+            "branches": [
+              0
+            ]
+          }
+        ]
+      },
+      "merge_options": {
+        "version": {
+          "metadata": {}
+        }
+      }
+    }
+  ],
+  "baseline_run": {
+    "label": "consistent_baseline",
+    "enumeration": {
+      "alphabet_size": 9,
+      "max_prefix_depth": 3,
+      "prefixes_replayed": 819,
+      "consistent_prefixes": 7
+    },
+    "findings": [
+      {
+        "class": "FALSE_REJECT",
+        "family": "oneof_branch_switch",
+        "root_cause": "jsonmerge/descenders.py:99-106 OneOf 要求同一分支同时验证 base 与 head，分支切换即 HeadInstanceError",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E3_config_switch_sensor",
+            "desc": "config 从 laptop 切 sensorNode（顶层 oneOf 互斥分支切换）",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "sensor",
+                "site": "lab-1"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b101"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t3"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E3_config_switch_sensor",
+            "branches": {
+              "#/config": [
+                1
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/config"
+        ],
+        "detail": "merge 抛 HeadInstanceError: No element of 'oneOf' validates both base and head（策略 objectMerge）",
+        "occurrences": 94
+      },
+      {
+        "class": "FALSE_REJECT",
+        "family": "oneof_branch_switch",
+        "root_cause": "jsonmerge/descenders.py:99-106 OneOf 要求同一分支同时验证 base 与 head，分支切换即 HeadInstanceError",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E4_payload_switch_geo",
+            "desc": "s1 的 payload 从 temp 切 geo（数组项内嵌 oneOf 互斥分支切换）；tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b102"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "geo",
+                    "grid": "G7"
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E4_payload_switch_geo",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    1
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/sensors/0/payload"
+        ],
+        "detail": "merge 抛 HeadInstanceError: No element of 'oneOf' validates both base and head（策略 objectMerge）",
+        "occurrences": 72
+      },
+      {
+        "class": "FALSE_ACCEPT",
+        "family": "append_constraints_stripped",
+        "root_cause": "jsonmerge/strategies.py:201-205 Append.get_schema 直接 pop 掉 maxItems/uniqueItems",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/tags"
+        ],
+        "detail": "uniqueItems 被破坏，重复值 ['t1']；该路径 V_out 放行（V_out 全文=[]）",
+        "occurrences": 65
+      },
+      {
+        "class": "FALSE_ACCEPT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E9_metadata_blank_override",
+            "desc": "合法事件；本次 merge 把 version metadata 覆盖为空（reading 历史字段漂移）；tag t1 制造跨事件重复",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            },
+            "merge_options": {
+              "version": {
+                "metadata": {}
+              }
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E9_metadata_blank_override",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/sensors/0/reading/0"
+        ],
+        "detail": "reading 历史条目 metadata 缺模板键 ['rev']；V_out 无 metadataSchema 约束，全文=[]",
+        "occurrences": 13
+      },
+      {
+        "class": "FALSE_ACCEPT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E9_metadata_blank_override",
+            "desc": "合法事件；本次 merge 把 version metadata 覆盖为空（reading 历史字段漂移）；tag t1 制造跨事件重复",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            },
+            "merge_options": {
+              "version": {
+                "metadata": {}
+              }
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E9_metadata_blank_override",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/sensors/0/reading/1"
+        ],
+        "detail": "reading 历史条目 metadata 缺模板键 ['rev']；V_out 无 metadataSchema 约束，全文=[]",
+        "occurrences": 5
+      },
+      {
+        "class": "FALSE_ACCEPT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E2_laptop_rollback_s1v2",
+            "desc": "config 同分支；firmware 切 rollback 分支；s1 同温度分支读数 v2；tag t2",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          },
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E9_metadata_blank_override",
+            "desc": "合法事件；本次 merge 把 version metadata 覆盖为空（reading 历史字段漂移）；tag t1 制造跨事件重复",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            },
+            "merge_options": {
+              "version": {
+                "metadata": {}
+              }
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E2_laptop_rollback_s1v2",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E9_metadata_blank_override",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "#/sensors/0/reading/2"
+        ],
+        "detail": "reading 历史条目 metadata 缺模板键 ['rev']；V_out 无 metadataSchema 约束，全文=[]",
+        "occurrences": 2
+      },
+      {
+        "class": "INPUT_INVALID_ACCEPTED",
+        "family": "array_id_silent_skip",
+        "root_cause": "jsonmerge/strategies.py:212-219 iter_index_key_item 吞掉 RefResolutionError 后 continue",
+        "prefix": [
+          {
+            "id": "E5_sensor_item_without_id",
+            "desc": "含一个缺 sensorId 的数组项（V_in 非法；arrayMergeById 静默跳过该项）",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "loc": "room-2",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 9.9
+                  }
+                },
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E5_sensor_item_without_id",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                },
+                {
+                  "path": "#/sensors/1/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "sensors/0"
+        ],
+        "detail": "V_in 报错 \"'sensorId' is a required property\"；merge 不校验输入；V_out 在该路径放行（误放）",
+        "occurrences": 162
+      },
+      {
+        "class": "INPUT_INVALID_ACCEPTED",
+        "family": "no_input_validation",
+        "root_cause": "jsonmerge/__init__.py:305-341 Merger.merge 从不调用 validator 校验 head",
+        "prefix": [
+          {
+            "id": "E7_firmware_missing_build",
+            "desc": "firmware 值缺 rollout 必填 build（V_in 非法；version 照样入史）",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E7_firmware_missing_build",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "firmware"
+        ],
+        "detail": "V_in 报错 \"{'phase': 'rollout'} is not valid under any of the given schemas\"；merge 不校验输入；V_out 在该路径拦截",
+        "occurrences": 162
+      },
+      {
+        "class": "INPUT_INVALID_ACCEPTED",
+        "family": "no_input_validation",
+        "root_cause": "jsonmerge/__init__.py:305-341 Merger.merge 从不调用 validator 校验 head",
+        "prefix": [
+          {
+            "id": "E6_s1_missing_loc",
+            "desc": "s1 项缺必填 loc（V_in 非法；objectMerge 无输入校验）",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 23.0
+                  },
+                  "reading": {
+                    "v": 3
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E6_s1_missing_loc",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "sensors/0"
+        ],
+        "detail": "V_in 报错 \"'loc' is a required property\"；merge 不校验输入；V_out 在该路径拦截",
+        "occurrences": 162
+      },
+      {
+        "class": "INPUT_INVALID_ACCEPTED",
+        "family": "no_input_validation",
+        "root_cause": "jsonmerge/__init__.py:305-341 Merger.merge 从不调用 validator 校验 head",
+        "prefix": [
+          {
+            "id": "E8_duplicate_tags",
+            "desc": "单个 head 内 tags 重复（V_in 违反 uniqueItems）",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t1",
+                "t1"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E8_duplicate_tags",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "tags"
+        ],
+        "detail": "V_in 报错 \"['t1', 't1'] has non-unique elements\"；merge 不校验输入；V_out 在该路径放行（误放）",
+        "occurrences": 162
+      }
+    ]
+  },
+  "metadata_split_brain_run": {
+    "label": "metadata_split_brain",
+    "enumeration": {
+      "alphabet_size": 9,
+      "max_prefix_depth": 3,
+      "prefixes_replayed": 819,
+      "consistent_prefixes": 0
+    },
+    "findings": [
+      {
+        "class": "DOWNSTREAM_FALSE_REJECT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "firmware/0"
+        ],
+        "detail": "V_out 拒绝: [\"'at' is a required property\"]",
+        "occurrences": 23
+      },
+      {
+        "class": "DOWNSTREAM_FALSE_REJECT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E2_laptop_rollback_s1v2",
+            "desc": "config 同分支；firmware 切 rollback 分支；s1 同温度分支读数 v2；tag t2",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E2_laptop_rollback_s1v2",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "firmware/0",
+          "firmware/1"
+        ],
+        "detail": "V_out 拒绝: [\"'at' is a required property\", \"'at' is a required property\"]",
+        "occurrences": 16
+      },
+      {
+        "class": "DOWNSTREAM_FALSE_REJECT",
+        "family": "version_metadata_split_brain",
+        "root_cause": "jsonmerge/strategies.py:88-96 merge 只消费 mergeOptions.metadata，strategies.py:128-148 get_schema 只消费独立的 metadataSchema，两者无一致性校验",
+        "prefix": [
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          },
+          {
+            "id": "E2_laptop_rollback_s1v2",
+            "desc": "config 同分支；firmware 切 rollback 分支；s1 同温度分支读数 v2；tag t2",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollback",
+                "reason": "defect"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 2
+                  }
+                }
+              ],
+              "tags": [
+                "t2"
+              ]
+            }
+          },
+          {
+            "id": "E1_laptop_rollout_s1temp",
+            "desc": "基线：laptop 分支 + rollout 分支 + s1 温度分支 + tag t1",
+            "doc": {
+              "deviceId": "dev-1",
+              "config": {
+                "class": "laptop",
+                "owner": "ann"
+              },
+              "firmware": {
+                "phase": "rollout",
+                "build": "b100"
+              },
+              "sensors": [
+                {
+                  "sensorId": "s1",
+                  "loc": "room-1",
+                  "payload": {
+                    "p": "temp",
+                    "celsius": 21.5
+                  },
+                  "reading": {
+                    "v": 1
+                  }
+                }
+              ],
+              "tags": [
+                "t1"
+              ]
+            }
+          }
+        ],
+        "branches": [
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E2_laptop_rollback_s1v2",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                1
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "event": "E1_laptop_rollout_s1temp",
+            "branches": {
+              "#/config": [
+                0
+              ],
+              "#/firmware": [
+                0
+              ],
+              "#/sensors/*/payload": [
+                {
+                  "path": "#/sensors/0/payload",
+                  "branches": [
+                    0
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "paths": [
+          "firmware/0",
+          "firmware/1",
+          "firmware/2"
+        ],
+        "detail": "V_out 拒绝: [\"'at' is a required property\", \"'at' is a required property\", \"'at' is a required property\"]",
+        "occurrences": 6
+      }
+    ]
+  },
+  "get_schema_mutation_hazard": {
+    "mutated": true,
+    "example_output_after_mutation": {
+      "deviceId": "dev-1",
+      "config": {
+        "class": "laptop",
+        "owner": "ann"
+      },
+      "firmware": {
+        "phase": "rollout",
+        "build": "b100"
+      },
+      "sensors": [
+        {
+          "sensorId": "s1",
+          "loc": "room-1",
+          "payload": {
+            "p": "temp",
+            "celsius": 21.5
+          },
+          "reading": {
+            "v": 1
+          }
+        }
+      ],
+      "tags": [
+        "t1"
+      ]
+    },
+    "note": "改写后同一 Merger 再 merge，version 包装消失，输出形态已不符合原 schema 语义"
+  }
+}
