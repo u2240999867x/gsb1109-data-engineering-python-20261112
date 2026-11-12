@@ -1,3 +1,16 @@
+2026-11-12	jsonmerge	1.10.0
+	* Add a WalkContext exposed as walk.context on both the merge and
+	  schema derivation walks. It provides read-only access to the
+	  current column path (schema_ref), base and head instance sources
+	  (base_ref, head_ref) and the resource the schema fragment was
+	  loaded from (resource_uri).
+	* Add Merger.derive_schema() for strategies that need to run a
+	  nested derivation of another schema. The nested derivation uses
+	  its own context, so the outer walk is unaffected by its success
+	  or failure and errors keep pointing at the original order row
+	  and column.
+	* JSONMergeError now carries an optional context attribute.
+
 2023-07-19	jsonmerge	1.9.2
 	* Fix failing tests with jsonschema>=4.18.0.
 

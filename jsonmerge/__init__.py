@@ -2,10 +2,11 @@
 from collections import OrderedDict
 from jsonmerge.jsonvalue import JSONValue
 from jsonmerge.resolver import LocalRefResolver
+from jsonmerge.context import WalkContext
 from jsonmerge import strategies
 from jsonmerge import descenders
 from jsonmerge.exceptions import SchemaError, JSONMergeError
-from jsonschema.validators import Draft4Validator
+from jsonschema.validators import Draft4Validator, urldefrag, urljoin
 import logging
 import warnings
 
@@ -27,6 +28,11 @@ class Walk(object):
         self.resolver = merger.validator.resolver
         self.lvl = -1
 
+        # Traversal context. Each descend() call updates it in place and
+        # restores the previous value on return, so nested walks see an
+        # independent context that never leaks back into the outer walk.
+        self.context = WalkContext()
+
         self.descenders = [ cls() for cls in self.DESCENDERS ]
 
     def _indent(self):
@@ -41,11 +47,55 @@ class Walk(object):
 
         return self.merger.validator.is_type(instance.val, type)
 
-    def descend(self, schema, *args):
+    def _resource_uri(self, schema):
+        # The resource (document) the current schema fragment was loaded
+        # from. Fragment-only references resolve to the resource that
+        # backs the walk's own resolver.
+        if schema.is_undef():
+            return self.resolver.base_uri
+
+        url, _fragment = urldefrag(
+                urljoin(self.resolver.base_uri, schema.ref))
+        return url
+
+    def _update_context(self, schema, *args):
+        self.context.schema_ref = schema.ref
+        self.context.resource_uri = self._resource_uri(schema)
+
+    def descend(self, schema, *args, **kwargs):
         assert isinstance(schema, JSONValue)
+
+        # An explicitly supplied context starts an independent nested
+        # traversal (e.g. a schema derivation triggered from a strategy).
+        nested_context = kwargs.pop('context', None)
+
         self.lvl += 1
 
         log.debug("descend: %sschema %s" % (self._indent(), schema.ref,))
+
+        previous_context = self.context
+        if nested_context is not None:
+            self.context = nested_context
+
+        self._update_context(schema, *args)
+
+        try:
+            rv = self._descend(schema, *args, **kwargs)
+        except JSONMergeError as exc:
+            # Remember where the error originated. A context already
+            # attached by a nested walk is preserved, so an error raised
+            # by the outer walk after a nested derivation keeps pointing
+            # at the outer order row and column.
+            if exc.context is None:
+                exc.context = self.context.copy()
+            raise
+        finally:
+            self.lvl -= 1
+            self.context = previous_context
+
+        return rv
+
+    def _descend(self, schema, *args, **kwargs):
 
         if not schema.is_undef():
             with self.resolver.resolving(schema.ref) as resolved:
@@ -59,7 +109,6 @@ class Walk(object):
             for descender in self.descenders:
                 rv = self.call_descender(descender, schema, *args)
                 if rv is not None:
-                    self.lvl -= 1
                     return rv
 
             name = schema.val.get("mergeStrategy")
@@ -89,7 +138,6 @@ class Walk(object):
                 exc.strategy_name = name
             raise
 
-        self.lvl -= 1
         return rv
 
 class WalkInstance(Walk):
@@ -98,6 +146,11 @@ class WalkInstance(Walk):
         Walk.__init__(self, merger, merge_options)
         self.base_resolver = LocalRefResolver("", base.val)
         self.head_resolver = LocalRefResolver("", head.val)
+
+    def _update_context(self, schema, base, head):
+        Walk._update_context(self, schema)
+        self.context.base_ref = base.ref
+        self.context.head_ref = head.ref
 
     def default_strategy(self, schema, base, head, **kwargs):
         log.debug("       : %sdefault strategy" % (self._indent(),))
@@ -164,7 +217,7 @@ class WalkSchema(Walk):
         assert isinstance(schema, JSONValue)
 
         if (not resolve_base) and self.is_base_context():
-            # no need to resolve refs in the context of the original schema - they 
+            # no need to resolve refs in the context of the original schema - they
             # are still valid
             return schema
         elif self.is_type(schema, "array"):
@@ -368,6 +421,57 @@ class Merger(object):
 
         walk = WalkSchema(self, merge_options)
         return walk.descend(schema).val
+
+    def derive_schema(self, schema, context=None):
+        """Derive a downstream schema without touching the calling walk.
+
+        This is intended for strategies that need to start a nested
+        derivation of another schema while processing an instance (for
+        example while merging members of an array). The derivation runs
+        on its own Merger and WalkSchema with its own WalkContext, so
+        neither the traversal state nor the error context of the calling
+        walk leaks into it or vice versa.
+
+        schema -- JSON schema (or JSONValue wrapping one) to derive from.
+        context -- Optional WalkContext to seed the nested derivation. If
+                   omitted, a fresh context rooted at the given schema is
+                   used. A copy of the calling walk's context can be
+                   passed to keep the same column and instance sources.
+
+        Returns the derived JSON schema as a plain JSON document.
+        """
+
+        if isinstance(schema, JSONValue):
+            schema_jv = schema
+            schema_doc = schema.val
+        else:
+            schema_doc = schema
+            schema_jv = JSONValue(schema)
+
+        # The other schema gets its own Merger (and hence its own
+        # resolver scope), while reusing this Merger's strategies,
+        # object classes and cached external resources.
+        nested_merger = Merger(
+                schema_doc,
+                strategies=self.strategies,
+                objclass_menu=self.objclass_menu,
+                validatorclass=type(self.validator))
+
+        # Reuse cached external resources from the calling Merger, but
+        # never overwrite documents already cached by the nested
+        # resolver (in particular its own base document).
+        nested_store = nested_merger.validator.resolver.store
+        for uri, document in self.validator.resolver.store.items():
+            nested_store.setdefault(uri, document)
+
+        walk = WalkSchema(nested_merger, merge_options={})
+
+        if context is None:
+            context = WalkContext(
+                    schema_ref=schema_jv.ref,
+                    resource_uri=walk.resolver.base_uri)
+
+        return walk.descend(schema_jv, context=context).val
 
 def merge(base, head, schema={}):
     """Merge two JSON documents using strategies defined in schema.

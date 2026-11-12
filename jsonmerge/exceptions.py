@@ -1,8 +1,9 @@
 class JSONMergeError(Exception):
-	def __init__(self, message, value=None, strategy_name=None):
+	def __init__(self, message, value=None, strategy_name=None, context=None):
 		self.message = message
 		self.value = value
 		self.strategy_name = strategy_name
+		self.context = context
 
 	def __str__(self):
 		r = self.message
@@ -19,6 +20,7 @@ class JSONMergeError(Exception):
 			r = "'%s' merge strategy: %s" % (self.strategy_name, r)
 
 		return r
+
 
 class BaseInstanceError(JSONMergeError): pass
 class HeadInstanceError(JSONMergeError): pass

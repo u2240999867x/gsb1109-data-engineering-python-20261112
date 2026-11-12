@@ -9,8 +9,10 @@ import jsonmerge.strategies
 from jsonmerge.exceptions import (
     HeadInstanceError,
     BaseInstanceError,
-    SchemaError
+    SchemaError,
+    JSONMergeError
 )
+from jsonmerge.context import WalkContext
 from jsonmerge.jsonvalue import JSONValue
 
 import jsonschema
@@ -2644,6 +2646,343 @@ class TestGetSchema(unittest.TestCase):
 
         self.assertIn('arrayMergeByIndex', str(cm.exception))
 
+class TestWalkContext(unittest.TestCase):
+
+    ARRAY_SCHEMA = {
+        'id': 'http://example.com/orders.json',
+        'properties': {
+            'rows': {
+                'mergeStrategy': 'arrayMergeById',
+                'items': {
+                    'properties': {
+                        'id': {'type': 'string'},
+                        'payload': {'mergeStrategy': 'probe'},
+                    },
+                },
+            },
+        },
+    }
+
+    def test_instance_walk_context(self):
+
+        seen = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                seen.append(walk.context.copy())
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(self.ARRAY_SCHEMA,
+                                  strategies={'probe': Probe()})
+
+        merger.merge(
+            {'rows': [{'id': 'A', 'payload': 1}]},
+            {'rows': [
+                {'id': 'A', 'payload': 2},
+                {'id': 'B', 'payload': 3},
+            ]})
+
+        self.assertEqual(2, len(seen))
+
+        self.assertEqual(
+            '#/properties/rows/items/properties/payload',
+            seen[0].schema_ref)
+        self.assertEqual('#/rows/0/payload', seen[0].base_ref)
+        self.assertEqual('#/rows/0/payload', seen[0].head_ref)
+        self.assertEqual(
+            'http://example.com/orders.json', seen[0].resource_uri)
+
+        # the second row has no base counterpart; head still carries
+        # its own order row path
+        self.assertEqual('#/rows/1/payload', seen[1].head_ref)
+        self.assertEqual(
+            '#/properties/rows/items/properties/payload',
+            seen[1].schema_ref)
+
+    def test_schema_walk_context(self):
+
+        seen = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                seen.append(walk.context.copy())
+                return schema
+
+        merger = jsonmerge.Merger(
+            {
+                'id': 'http://example.com/orders.json',
+                'properties': {'a': {'mergeStrategy': 'probe'}},
+            },
+            strategies={'probe': Probe()})
+
+        merger.get_schema()
+
+        self.assertEqual(1, len(seen))
+        self.assertEqual('#/properties/a', seen[0].schema_ref)
+        self.assertIsNone(seen[0].base_ref)
+        self.assertIsNone(seen[0].head_ref)
+        self.assertEqual(
+            'http://example.com/orders.json', seen[0].resource_uri)
+
+    def test_context_copy_is_independent(self):
+
+        context = WalkContext(schema_ref='#/a', base_ref='#/b',
+                              head_ref='#/c', resource_uri='http://x')
+        copied = context.copy()
+        copied.schema_ref = '#/other'
+
+        self.assertEqual('#/a', context.schema_ref)
+        self.assertEqual('#/other', copied.schema_ref)
+        self.assertEqual('#/b', copied.base_ref)
+        self.assertEqual('#/c', copied.head_ref)
+        self.assertEqual('http://x', copied.resource_uri)
+
+    def test_nested_derive_schema(self):
+
+        other_schema = {
+            'type': 'object',
+            'properties': {'v': {'mergeStrategy': 'version'}},
+        }
+
+        contexts = []
+        derived_schemas = []
+
+        class NestedDerive(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                derived = walk.merger.derive_schema(
+                    other_schema, context=walk.context.copy())
+                derived_schemas.append(derived)
+                contexts.append(walk.context.copy())
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(
+            self.ARRAY_SCHEMA,
+            strategies={'probe': NestedDerive()})
+
+        result = merger.merge(
+            {'rows': [{'id': 'A', 'payload': 1}]},
+            {'rows': [
+                {'id': 'A', 'payload': 2},
+                {'id': 'B', 'payload': 3},
+            ]})
+
+        expected_derived = {
+            'type': 'object',
+            'properties': {
+                'v': {
+                    'type': 'array',
+                    'items': {'properties': {'value': {}}},
+                },
+            },
+        }
+        self.assertEqual([expected_derived, expected_derived],
+                         derived_schemas)
+
+        self.assertEqual({'rows': [
+            {'id': 'A', 'payload': 2},
+            {'id': 'B', 'payload': 3},
+        ]}, result)
+
+        # the nested derivation did not disturb the outer walk context
+        self.assertEqual(2, len(contexts))
+        self.assertEqual('#/rows/0/payload', contexts[0].head_ref)
+        self.assertEqual('#/rows/1/payload', contexts[1].head_ref)
+        for context in contexts:
+            self.assertEqual(
+                '#/properties/rows/items/properties/payload',
+                context.schema_ref)
+
+    def test_nested_derive_without_explicit_context(self):
+
+        other_schema = {
+            'type': 'object',
+            'properties': {'v': {'mergeStrategy': 'version'}},
+        }
+
+        derived_schemas = []
+
+        class Noop(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                derived = walk.merger.derive_schema(other_schema)
+                derived_schemas.append(derived)
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(
+            self.ARRAY_SCHEMA,
+            strategies={'probe': Noop()})
+
+        merger.merge(None, {'rows': [{'id': 'A', 'payload': 1}]})
+
+        self.assertEqual(1, len(derived_schemas))
+        self.assertIn('properties', derived_schemas[0])
+
+    def test_nested_derive_error_points_at_outer_row(self):
+
+        bad_schema = {
+            'properties': {'v': {'mergeStrategy': 'no-such-strategy'}},
+        }
+
+        class FailingNested(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                try:
+                    walk.merger.derive_schema(
+                        bad_schema, context=walk.context.copy())
+                except JSONMergeError:
+                    raise HeadInstanceError(
+                        "nested derivation failed for this row", head)
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(
+            self.ARRAY_SCHEMA,
+            strategies={'probe': FailingNested()})
+
+        with self.assertRaises(HeadInstanceError) as cm:
+            merger.merge(
+                None,
+                {'rows': [
+                    {'id': 'A', 'payload': 1},
+                    {'id': 'B', 'payload': 2},
+                ]})
+
+        # the outer error must point back at the original order row
+        self.assertEqual('#/rows/0/payload', cm.exception.value.ref)
+        self.assertEqual(
+            '#/properties/rows/items/properties/payload',
+            cm.exception.context.schema_ref)
+        self.assertEqual(
+            '#/rows/0/payload', cm.exception.context.head_ref)
+
+    def test_nested_derive_error_recovery(self):
+
+        bad_schema = {
+            'properties': {'v': {'mergeStrategy': 'no-such-strategy'}},
+        }
+
+        contexts = []
+
+        class Recovering(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                try:
+                    walk.merger.derive_schema(
+                        bad_schema, context=walk.context.copy())
+                except JSONMergeError:
+                    pass
+                contexts.append((walk.context.schema_ref,
+                                 walk.context.head_ref))
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(
+            self.ARRAY_SCHEMA,
+            strategies={'probe': Recovering()})
+
+        result = merger.merge(
+            None,
+            {'rows': [
+                {'id': 'A', 'payload': 1},
+                {'id': 'B', 'payload': 2},
+            ]})
+
+        self.assertEqual([
+            ('#/properties/rows/items/properties/payload',
+             '#/rows/0/payload'),
+            ('#/properties/rows/items/properties/payload',
+             '#/rows/1/payload'),
+        ], contexts)
+        self.assertEqual({'rows': [
+            {'id': 'A', 'payload': 1},
+            {'id': 'B', 'payload': 2},
+        ]}, result)
+
+    def test_same_ref_fragment_different_resources(self):
+
+        resources = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                resources.append((walk.context.schema_ref,
+                                  walk.context.resource_uri))
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        for uri in ('http://example.com/schema_a.json',
+                    'http://example.com/schema_b.json'):
+            schema = {
+                'id': uri,
+                'definitions': {'thing': {'mergeStrategy': 'probe'}},
+                'properties': {
+                    'a': {'$ref': '#/definitions/thing'},
+                },
+            }
+            merger = jsonmerge.Merger(schema,
+                                      strategies={'probe': Probe()})
+            merger.merge(None, {'a': {'x': 1}})
+
+        self.assertEqual([
+            ('#/definitions/thing',
+             'http://example.com/schema_a.json'),
+            ('#/definitions/thing',
+             'http://example.com/schema_b.json'),
+        ], resources)
+
+    def test_external_ref_resource_uri(self):
+
+        schema_1 = {
+            'id': 'http://example.com/schema_1.json',
+            'properties': {
+                'a': {'$ref': "schema_2.json#/definitions/a"},
+            },
+        }
+
+        schema_2 = {
+            'id': 'http://example.com/schema_2.json',
+            'definitions': {
+                'a': {'properties': {'b': {'mergeStrategy': 'probe'}}},
+            },
+        }
+
+        seen = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                seen.append(walk.context.copy())
+                return head
+
+            def get_schema(self, walk, schema, **kwargs):
+                return schema
+
+        merger = jsonmerge.Merger(schema_1,
+                                  strategies={'probe': Probe()})
+        merger.cache_schema(schema_2)
+        merger.merge(None, {'a': {'b': 'c'}})
+
+        self.assertEqual(1, len(seen))
+        self.assertEqual(
+            'schema_2.json#/definitions/a/properties/b',
+            seen[0].schema_ref)
+        self.assertEqual(
+            'http://example.com/schema_2.json', seen[0].resource_uri)
+        self.assertEqual('#/a/b', seen[0].head_ref)
+
+
 class TestExceptions(unittest.TestCase):
     def test_str_with_ref(self):
         e = SchemaError("Test error", JSONValue({}, '#'))
@@ -2659,6 +2998,18 @@ class TestExceptions(unittest.TestCase):
         e = SchemaError("Test error", JSONValue({}, '#'), 'test')
 
         self.assertEqual(str(e), "'test' merge strategy: Test error: #")
+
+    def test_context_defaults_to_none(self):
+        e = SchemaError("Test error", JSONValue({}, '#'))
+
+        self.assertIsNone(e.context)
+
+    def test_context_is_stored(self):
+        context = WalkContext(schema_ref='#/a')
+        e = SchemaError("Test error", JSONValue({}, '#'), context=context)
+
+        self.assertIs(context, e.context)
+        self.assertEqual('#/a', e.context.schema_ref)
 
 if __name__ == '__main__':
     unittest.main()

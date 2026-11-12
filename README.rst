@@ -391,6 +391,49 @@ that defines what to do in such cases. See docstring documentation for the
 *Strategy* class on how to do that.
 
 
+Traversal context
+-----------------
+
+Both the document merge (``merge()``) and the downstream schema
+derivation (``get_schema()``) traverse their inputs using a walk object
+that is passed as the first argument to every strategy. Each walk exposes
+the same read-only ``context`` (a ``jsonmerge.context.WalkContext``) with
+the position of the current step:
+
+schema_ref
+   JSON pointer of the current source column within the merge schema.
+
+base_ref
+   JSON pointer of the current *base* instance, or ``None`` during a
+   schema derivation where no instance is available.
+
+head_ref
+   JSON pointer of the current *head* instance, or ``None`` during a
+   schema derivation where no instance is available.
+
+resource_uri
+   URI of the resource (schema document) the current schema fragment was
+   loaded from. Two identical reference fragments entered from different
+   base resources therefore remain distinguishable.
+
+A strategy can start a nested derivation of another schema while it is
+processing an instance (for example while merging members of an array)
+by calling ``Merger.derive_schema(schema, context=None)``. The nested
+derivation uses its own walk and its own context, so it never disturbs
+the outer traversal. Pass a copy of the current context
+(``walk.context.copy()``) to keep the same column and instance sources,
+or omit the argument to start from a fresh context rooted at the given
+schema.
+
+If the nested derivation raises a
+``jsonmerge.exceptions.JSONMergeError``, the error carries the context in
+which it occurred. Once it is handled (or re-raised), the outer walk
+keeps its own context: any error subsequently raised by the outer walk
+still points back at the original order row and column. After a nested
+error is caught and swallowed, the outer walk continues with the next
+array member as usual.
+
+
 Security considerations
 -----------------------
 
