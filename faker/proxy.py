@@ -2,22 +2,51 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
+import random as random_module
 import re
 
 from collections import OrderedDict
 from random import Random
-from typing import Any, Callable, Pattern, Sequence, TypeVar
+from typing import Any, Callable, Hashable, Pattern, Sequence, TypeVar
 
 from .config import DEFAULT_LOCALE
 from .exceptions import UniquenessException
 from .factory import Factory
-from .generator import Generator
+from .generator import Generator, Sentinel
 from .typing import SeedType
 from .utils.distribution import choices_distribution
 
 _UNIQUE_ATTEMPTS = 1000
 
 RetType = TypeVar("RetType")
+
+
+def _derive_deterministic_seed(
+    base_seed: Any,
+    record_key: Hashable,
+    field_name: str,
+    args: tuple,
+    kwargs: dict,
+) -> int:
+    """
+    Derives a stable integer seed for one (record, field) pair
+
+    The derivation only depends on the explicit seeds registered on the
+    instance, the record key, the field name, and the call arguments, so the
+    same value can be reproduced regardless of call order or interleaving.
+    """
+    payload = repr((base_seed, record_key, field_name, args, tuple(sorted(kwargs.items()))))
+    digest = hashlib.sha256(payload.encode("utf-8")).digest()
+    return int.from_bytes(digest, "big")
+
+
+def _recorded_seed(generator: Any) -> Any:
+    """
+    Returns the explicit instance seed recorded on a generator, or None
+    """
+    seed = getattr(generator, "_instance_seed", Sentinel)
+    return None if seed is Sentinel else seed
 
 
 class Faker:
@@ -296,6 +325,99 @@ class Faker:
 
     def items(self) -> list[tuple[str, Generator | Faker]]:
         return list(self._factory_map.items())
+
+    def for_record(self, record_key: Hashable) -> DeterministicProxy:
+        """
+        Returns a proxy that generates deterministic values for one record
+
+        Values produced through the returned proxy depend only on the explicit
+        seeds registered on this instance, the ``record_key``, the field name,
+        and the call arguments. This allows a single record (e.g. one order
+        identified by its business key) to be regenerated field by field with
+        results identical to a full-table generation, while the random
+        sequence of this ``Faker`` instance is left untouched.
+
+        :param record_key: hashable business key identifying the record
+        :return: a proxy exposing all provider methods for the record
+        """
+        return DeterministicProxy(self, record_key)
+
+    def _all_generators(self) -> list[Generator]:
+        """
+        Returns all underlying `Generator` objects, recursing into sub-Fakers
+        """
+        generators: list[Generator] = []
+        for factory in self._factories:
+            if isinstance(factory, Faker):
+                generators.extend(factory._all_generators())
+            else:
+                generators.append(factory)
+        return generators
+
+    def _deterministic_base_seed(self) -> Any:
+        """
+        Collects the explicit seeds registered on this instance's generators
+        """
+        global_seed = Generator._global_seed
+        instance_seeds = tuple(_recorded_seed(generator) for generator in self._all_generators())
+        return (
+            None if global_seed is Sentinel else global_seed,
+            instance_seeds,
+        )
+
+
+class DeterministicProxy:
+    """
+    Generates deterministic per-record, per-field values from a `Faker` instance
+
+    Each call derives a fresh random stream from the instance's explicit
+    seeds, the record key, the field name, and the call arguments. The
+    derived stream temporarily replaces the random objects of all underlying
+    generators for the duration of the call, so provider methods that draw
+    further values internally (e.g. a custom address field pulling names and
+    building numbers) attribute those draws to the field being generated.
+    The instance's own random sequence is restored afterwards and is never
+    advanced, so calls for different records and shards may be freely
+    interleaved, and failed calls may be retried with identical results.
+    """
+
+    def __init__(self, proxy: Faker, record_key: Hashable):
+        self._proxy = proxy
+        self._record_key = record_key
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._wrap(name)
+
+    def _wrap(self, name: str) -> Callable:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            proxy = self._proxy
+            seed = _derive_deterministic_seed(
+                proxy._deterministic_base_seed(),
+                self._record_key,
+                name,
+                args,
+                kwargs,
+            )
+            generators = proxy._all_generators()
+            saved_randoms = [generator.random for generator in generators]
+            derived_random = random_module.Random(seed)
+            try:
+                for generator in generators:
+                    generator.random = derived_random
+                # Resolve the formatter within the derived stream so that
+                # locale selection in multiple locale mode is also
+                # deterministic and does not touch the instance's sequence.
+                function = getattr(proxy, name)
+                if not callable(function):
+                    raise TypeError("Accessing non-functions through .for_record() is not supported.")
+                return function(*args, **kwargs)
+            finally:
+                for generator, saved_random in zip(generators, saved_randoms):
+                    generator.random = saved_random
+
+        return wrapper
 
 
 class UniqueProxy:

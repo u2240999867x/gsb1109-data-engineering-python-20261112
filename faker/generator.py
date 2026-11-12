@@ -23,6 +23,7 @@ class Generator:
 
     _is_seeded = False
     _global_seed = Sentinel
+    _instance_seed = Sentinel
 
     def __init__(self, **config: Dict) -> None:
         self.providers: List["BaseProvider"] = []
@@ -73,6 +74,7 @@ class Generator:
             self.__random = random_module.Random()
         self.__random.seed(seed)
         self._is_seeded = True
+        self._instance_seed = seed
         return self
 
     @classmethod
