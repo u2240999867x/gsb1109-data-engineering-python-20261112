@@ -30,7 +30,21 @@ from natsort.natsort import (
     realsorted,
 )
 from natsort.ns_enum import NSType, ns
+from natsort.semver import SemVer, SemVerParseError, parse_semver
 from natsort.utils import KeyType, NatsortInType, NatsortOutType, chain_functions
+from natsort.versioning import (
+    PageCursor,
+    VersionPage,
+    VersionRecord,
+    index_versionsorted,
+    iter_merged_versions,
+    merge_sorted_versions,
+    merge_versions,
+    sorted_version_records,
+    version_records,
+    version_sort_keygen,
+    versionsorted,
+)
 
 __all__ = [
     "KeyType",
@@ -39,6 +53,11 @@ __all__ = [
     "NatsortKeyType",
     "NatsortOutType",
     "OSSortKeyType",
+    "PageCursor",
+    "SemVer",
+    "SemVerParseError",
+    "VersionPage",
+    "VersionRecord",
     "as_ascii",
     "as_utf8",
     "chain_functions",
@@ -47,6 +66,10 @@ __all__ = [
     "index_humansorted",
     "index_natsorted",
     "index_realsorted",
+    "index_versionsorted",
+    "iter_merged_versions",
+    "merge_sorted_versions",
+    "merge_versions",
     "natsort_key",
     "natsort_keygen",
     "natsorted",
@@ -56,7 +79,12 @@ __all__ = [
     "os_sort_key",
     "os_sort_keygen",
     "os_sorted",
+    "parse_semver",
     "realsorted",
+    "sorted_version_records",
+    "version_records",
+    "version_sort_keygen",
+    "versionsorted",
 ]
 
 # Add the ns keys to this namespace for convenience.

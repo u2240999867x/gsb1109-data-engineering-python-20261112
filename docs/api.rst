@@ -81,6 +81,92 @@ Convenience Functions
 
 .. autofunction:: order_by_index
 
+Version Registry Sorting
+------------------------
+
+Registries of release records can be sorted by `SemVer 2.0.0
+<https://semver.org/>`_ precedence. Build metadata is retained verbatim
+and never participates in ordering; ties fall back to a global ingestion
+sequence number, and values that are not semantic versions form a
+separate zone sorted with the standard natural key. Already sorted
+registries (partitions) can be merged page by page without skipping or
+re-emitting a row.
+
+:func:`~natsort.versionsorted`
+++++++++++++++++++++++++++++++
+
+.. autofunction:: versionsorted
+
+:func:`~natsort.version_sort_keygen`
+++++++++++++++++++++++++++++++++++++
+
+.. autofunction:: version_sort_keygen
+
+:func:`~natsort.index_versionsorted`
+++++++++++++++++++++++++++++++++++++
+
+.. autofunction:: index_versionsorted
+
+:func:`~natsort.version_records`
+++++++++++++++++++++++++++++++++
+
+.. autofunction:: version_records
+
+:func:`~natsort.sorted_version_records`
++++++++++++++++++++++++++++++++++++++++
+
+.. autofunction:: sorted_version_records
+
+:func:`~natsort.merge_sorted_versions`
+++++++++++++++++++++++++++++++++++++++
+
+.. autofunction:: merge_sorted_versions
+
+:func:`~natsort.iter_merged_versions`
++++++++++++++++++++++++++++++++++++++
+
+.. autofunction:: iter_merged_versions
+
+:func:`~natsort.merge_versions`
++++++++++++++++++++++++++++++++
+
+.. autofunction:: merge_versions
+
+:class:`~natsort.VersionRecord`
++++++++++++++++++++++++++++++++
+
+.. autoclass:: VersionRecord
+    :members:
+
+:class:`~natsort.PageCursor`
+++++++++++++++++++++++++++++
+
+.. autoclass:: PageCursor
+    :members:
+
+:class:`~natsort.VersionPage`
++++++++++++++++++++++++++++++
+
+.. autoclass:: VersionPage
+    :members:
+
+:class:`~natsort.SemVer`
+++++++++++++++++++++++++
+
+.. autoclass:: SemVer
+    :members:
+
+:func:`~natsort.parse_semver`
++++++++++++++++++++++++++++++
+
+.. autofunction:: parse_semver
+
+:class:`~natsort.SemVerParseError`
+++++++++++++++++++++++++++++++++++
+
+.. autoclass:: SemVerParseError
+    :members:
+
 .. _bytes_help:
 
 Help With Bytes
