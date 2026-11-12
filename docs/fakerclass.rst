@@ -409,3 +409,66 @@ fast membership testing.
    fake = faker.Faker()
 
    fake.unique.profile()  # TypeError: unhashable type: 'dict'
+
+
+Row-Level Unique Reservations
+-----------------------------
+
+The ``.unique`` attribute tracks one provider method at a time. When a
+synthetic record carries several business keys in one unique index — for
+example a customer primary key and an alias produced by two different
+providers — use the ``.reserve`` entry point instead. It normalizes every
+column into a single, named key space and only occupies that space once
+the complete row is delivered.
+
+.. code:: python
+
+   from faker import Faker
+
+   fake = Faker()
+   columns = [
+       fake.reserve.column("customer_id", "random_int", min=1, max=10_000),
+       fake.reserve.column("account_code", "pystr_format", string_format="ACC-#####"),
+   ]
+
+   with fake.reserve.row("customers", columns) as reservation:
+       row = reservation.reserve()  # Whole row is generated and held
+       # ... persist the record ...
+   # Leaving the context commits the row; its keys now occupy the domain.
+
+Business keys are normalized before comparison, so ``7``, ``7.0`` and the
+strings ``"7"`` / ``"007"`` map to the same key. A collision on any single
+column — including two columns of the same row collapsing to one key —
+discards the attempt and regenerates the entire row, up to ``attempts``
+times. If every attempt fails, ``UniqueConflict`` is raised and its
+``conflicting_keys`` attribute hands the offending normalized keys back
+to the caller:
+
+.. code:: python
+
+   from faker.exceptions import UniqueConflict
+
+   try:
+       row = reservation.reserve()
+   except UniqueConflict as exc:
+       handle(exc.conflicting_keys)
+
+A reservation is provisional until ``commit()``. Calling ``release()`` (or
+raising inside the ``with`` block) returns only that row's pending keys, so
+independent generators interleaved on the same named domain cannot clear
+values another generator has already committed:
+
+.. code:: python
+
+   reservation = fake.reserve.row("customers", columns)
+   row = reservation.reserve()
+   reservation.release()  # Nothing from this row stays occupied.
+
+To resume numbering after a restart, rebuild the domain from the rows that
+were already delivered, then continue generating the next batch:
+
+.. code:: python
+
+   committed = load_existing_customer_rows()
+   fake.reserve.rebuild("customers", committed, columns)
+   # New reservations now avoid every key present in `committed`.

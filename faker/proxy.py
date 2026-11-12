@@ -13,6 +13,7 @@ from .exceptions import UniquenessException
 from .factory import Factory
 from .generator import Generator
 from .typing import SeedType
+from .unique import UniqueRowFactory
 from .utils.distribution import choices_distribution
 
 _UNIQUE_ATTEMPTS = 1000
@@ -41,6 +42,7 @@ class Faker:
         self._weights = None
         self._unique_proxy = UniqueProxy(self)
         self._optional_proxy = OptionalProxy(self)
+        self._reserve_factory = UniqueRowFactory(self)
 
         if isinstance(locale, str):
             locales = [locale.replace("-", "_")]
@@ -149,6 +151,7 @@ class Faker:
         result._unique_proxy = UniqueProxy(result)
         result._unique_proxy._seen = {k: {result._unique_proxy._sentinel} for k in self._unique_proxy._seen.keys()}
         result._optional_proxy = OptionalProxy(result)
+        result._reserve_factory = UniqueRowFactory(result)
         return result
 
     def __setstate__(self, state: Any) -> None:
@@ -161,6 +164,11 @@ class Faker:
     @property
     def optional(self) -> OptionalProxy:
         return self._optional_proxy
+
+    @property
+    def reserve(self) -> UniqueRowFactory:
+        """Entry point for row-level, business-key-normalized reservations."""
+        return self._reserve_factory
 
     def _select_factory(self, method_name: str) -> Factory:
         """

@@ -429,6 +429,7 @@ class TestFakerProxyClass:
                 "_weights",
                 "_unique_proxy",
                 "_optional_proxy",
+                "_reserve_factory",
             ]
         )
         for factory in fake.factories:
