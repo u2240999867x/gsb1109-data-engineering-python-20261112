@@ -1,3 +1,13 @@
+Unreleased
+----------
+
+**SchemaBuilder**:
+
+* Dependencies hidden inside ``choice()`` and ``weighted_choice()`` branches are now discovered structurally, so generation order is correct regardless of declaration order.
+* Zero-weight branches no longer create dependencies; cycles confined to such branches no longer block a batch, while cycles on positive-weight branches are reported before any row is generated.
+* Added deterministic conditional branches via ``when()`` together with ``eq()``/``ne()`` and per-batch ``constants`` passed to ``create()``. Undecidable conditions conservatively keep every reachable dependency.
+* Topological ordering now breaks ties by schema declaration order, making generated output identical for any ``create()`` keyword order with the same seed.
+
 Version 21.0.0
 --------------
 

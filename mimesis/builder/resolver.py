@@ -1,7 +1,7 @@
 """Lazy evaluation types for SchemaBuilder."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from mimesis.types import Key
@@ -11,14 +11,29 @@ if TYPE_CHECKING:
     from mimesis.builder.core import SchemaBuilder
 
 __all__ = [
+    "OMITTED",
     "FieldRef",
     "LazyChoice",
     "LazyField",
     "LazyWeightedChoice",
+    "LazyWhen",
     "NestedSchema",
     "Resolvable",
     "SchemaRefProxy",
+    "ValueCondition",
 ]
+
+
+class _Omitted:
+    """Sentinel marking a conditional branch that is not taken."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "OMITTED"
+
+
+OMITTED = _Omitted()
 
 
 class Resolvable(ABC):
@@ -34,6 +49,67 @@ class Resolvable(ABC):
         :return: The resolved value.
         """
         raise NotImplementedError
+
+
+class ValueCondition:
+    """Deterministic predicate evaluated against per-batch constants.
+
+    The verdict is purely static:
+
+    - ``True`` / ``False`` when the referenced constant is known
+    - ``None`` when it cannot be determined before generation, in which
+      case dependency analysis conservatively keeps every reachable branch
+    """
+
+    __slots__ = ("_actual", "_equal", "_expected")
+
+    def __init__(self, actual: str, expected: Any, equal: bool) -> None:
+        self._actual = actual
+        self._expected = expected
+        self._equal = equal
+
+    def _evaluate(self, constants: Mapping[str, Any] | None) -> bool | None:
+        """Evaluate the condition against the given constants.
+
+        :param constants: Mapping of constant names to batch values.
+        :return: ``True``/``False`` when decidable, otherwise ``None``.
+        """
+        if not isinstance(constants, Mapping) or self._actual not in constants:
+            return None
+        matched = constants[self._actual] == self._expected
+        return matched if self._equal else not matched
+
+    def __repr__(self) -> str:
+        operator = "==" if self._equal else "!="
+        return f"ValueCondition({self._actual!r} {operator} {self._expected!r})"
+
+
+class LazyWhen(Resolvable):
+    """Conditionally include a branch based on a deterministic condition.
+
+    When the condition evaluates to ``False`` the branch is omitted:
+    dict fields disappear and list/tuple elements are dropped. When it
+    cannot be decided (the referenced constant is absent), the branch
+    is kept.
+
+    Example::
+
+        sb.when(sb.ref(cross_border_parents).id, sb.eq("order_type", "cb"))
+    """
+
+    __slots__ = ("_condition", "_value")
+
+    def __init__(self, value: Any, condition: ValueCondition) -> None:
+        self._value = value
+        self._condition = condition
+
+    def _resolve(self, builder: "SchemaBuilder") -> Any:
+        if self._condition._evaluate(builder._constants) is False:
+            return OMITTED
+        return builder._resolve_value(self._value)
+
+    def __repr__(self) -> str:
+        return f"LazyWhen({self._value!r}, {self._condition!r})"
 
 
 class LazyField(Resolvable):
@@ -79,7 +155,17 @@ class LazyChoice(Resolvable):
         self._items = items
 
     def _resolve(self, builder: "SchemaBuilder") -> Any:
-        return builder._random.choice(self._items)
+        items = [
+            item
+            for item in self._items
+            if not (
+                isinstance(item, LazyWhen)
+                and item._condition._evaluate(builder._constants) is False
+            )
+        ]
+        if not items:
+            return OMITTED
+        return builder._random.choice(items)
 
     def __repr__(self) -> str:
         return f"LazyChoice({self._items!r})"
@@ -108,7 +194,18 @@ class LazyWeightedChoice(Resolvable):
         self._weights = weights
 
     def _resolve(self, builder: "SchemaBuilder") -> Any:
-        return builder._random.choices(self._items, weights=self._weights)[0]
+        active = [
+            (item, weight)
+            for item, weight in zip(self._items, self._weights, strict=True)
+            if not (
+                isinstance(item, LazyWhen)
+                and item._condition._evaluate(builder._constants) is False
+            )
+        ]
+        if not active:
+            return OMITTED
+        items, weights = zip(*active, strict=True)
+        return builder._random.choices(items, weights=weights)[0]
 
     def __repr__(self) -> str:
         return f"LazyWeightedChoice({self._items!r})"

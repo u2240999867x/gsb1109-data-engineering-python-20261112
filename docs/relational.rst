@@ -163,6 +163,58 @@ foreign-key references. You can pass counts in any order:
     data = sb.create(api_keys=10, projects=5, users=3)
     # users → projects → api_keys
 
+References are found *structurally*, including ones nested inside
+:meth:`~mimesis.builder.SchemaBuilder.choice` and
+:meth:`~mimesis.builder.SchemaBuilder.weighted_choice` — no random sampling is
+used to discover dependencies. A weighted branch with a zero weight contributes
+no dependency: a cycle hidden entirely behind zero-weight branches does not
+block the batch, while a cycle on a branch that still has a positive weight is
+reported before a single row is written.
+
+Conditional Branches
+--------------------
+
+Sometimes a reference only makes sense for certain batches — for example,
+cross-border orders reference a customs table, domestic orders do not. Guard
+such branches with :meth:`~mimesis.builder.SchemaBuilder.when` and a
+deterministic condition built by :meth:`~mimesis.builder.SchemaBuilder.eq` or
+:meth:`~mimesis.builder.SchemaBuilder.ne`:
+
+.. code-block:: python
+
+    orders = sb.schema(
+        "orders",
+        {
+            "id": sb.f("increment"),
+            "domestic_id": sb.when(
+                sb.ref(domestic_parents).id,
+                sb.ne("order_type", "cross_border"),
+            ),
+            "customs_id": sb.when(
+                sb.ref(customs).id,
+                sb.eq("order_type", "cross_border"),
+            ),
+        },
+    )
+
+Conditions never consume random state. They are evaluated against the
+``constants`` mapping of the batch:
+
+.. code-block:: python
+
+    # Only customs is required; domestic_id is omitted from every row.
+    data = sb.create(
+        constants={"order_type": "cross_border"},
+        orders=20,
+        customs=5,
+    )
+
+When a condition is false the whole branch is omitted: the field disappears
+from records and list or tuple elements are dropped. If the referenced
+constant is not supplied, the condition cannot be decided before generation,
+so every branch it guards stays reachable and all of its dependencies are
+kept — the analysis never guesses.
+
 Lifecycle Helpers
 -----------------
 

@@ -11,9 +11,11 @@ from mimesis.builder.resolver import (
     LazyChoice,
     LazyField,
     LazyWeightedChoice,
+    LazyWhen,
     NestedSchema,
     Resolvable,
     SchemaRefProxy,
+    ValueCondition,
 )
 from mimesis.enums import TimestampFormat
 from mimesis.locales import Locale
@@ -706,3 +708,268 @@ class TestComplexSchemas:
 
         # tags was also requested as top-level generation
         assert len(data["tags"]) == 6
+
+
+class TestConditionalBranches:
+    def test_eq_ne_build_conditions_and_when_wraps_value(
+        self, sb: SchemaBuilder
+    ) -> None:
+        eq_condition = sb.eq("order_type", "cb")
+        ne_condition = sb.ne("order_type", "cb")
+        assert isinstance(eq_condition, ValueCondition)
+        assert repr(eq_condition) == "ValueCondition('order_type' == 'cb')"
+        assert repr(ne_condition) == "ValueCondition('order_type' != 'cb')"
+
+        branch = sb.when(sb.f("word"), eq_condition)
+        assert isinstance(branch, LazyWhen)
+        assert "LazyWhen" in repr(branch)
+
+    def test_when_rejects_non_condition(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match=r"sb\.eq"):
+            sb.when(sb.f("word"), "order_type == 'cb'")  # type: ignore[arg-type]
+
+    def test_constants_select_only_the_taken_branch(self, sb: SchemaBuilder) -> None:
+        domestic = sb.schema("domestic_parents", {"id": sb.f("increment")})
+        customs = sb.schema(
+            "customs",
+            {"id": sb.f("increment"), "entry": sb.f("word")},
+        )
+        sb.schema(
+            "orders",
+            {
+                "id": sb.f("increment"),
+                "domestic_id": sb.when(sb.ref(domestic).id, sb.ne("order_type", "cb")),
+                "customs_id": sb.when(sb.ref(customs).id, sb.eq("order_type", "cb")),
+                "nested": {
+                    "entry": sb.when(sb.ref(customs).entry, sb.eq("order_type", "cb"))
+                },
+            },
+        )
+
+        cross_border = sb.create(constants={"order_type": "cb"}, orders=4, customs=2)
+        for order in cross_border["orders"]:
+            assert "domestic_id" not in order
+            assert order["customs_id"] in {c["id"] for c in cross_border["customs"]}
+            assert "entry" in order["nested"]
+
+        domestic_batch = sb.create(
+            constants={"order_type": "domestic"}, orders=4, domestic_parents=3
+        )
+        for order in domestic_batch["orders"]:
+            assert "customs_id" not in order
+            assert order["domestic_id"] in {
+                parent["id"] for parent in domestic_batch["domestic_parents"]
+            }
+            assert order["nested"] == {}
+
+    def test_undecidable_condition_keeps_every_reachable_dependency(
+        self, sb: SchemaBuilder
+    ) -> None:
+        domestic = sb.schema("domestic_parents", {"id": sb.f("increment")})
+        customs = sb.schema("customs", {"id": sb.f("increment")})
+        sb.schema(
+            "orders",
+            {
+                "domestic_id": sb.when(
+                    sb.ref(domestic).id, sb.eq("order_type", "domestic")
+                ),
+                "customs_id": sb.when(sb.ref(customs).id, sb.eq("order_type", "cb")),
+            },
+        )
+
+        assert sb._dependencies["orders"] == {"domestic_parents", "customs"}
+        with pytest.raises(ValueError, match="required by 'orders'"):
+            sb.create(orders=3)
+
+    def test_false_condition_removes_dependency(self, sb: SchemaBuilder) -> None:
+        customs = sb.schema("customs", {"id": sb.f("increment")})
+        sb.schema(
+            "orders",
+            {
+                "id": sb.f("increment"),
+                "customs_id": sb.when(sb.ref(customs).id, sb.eq("order_type", "cb")),
+            },
+        )
+
+        sb.create(constants={"order_type": "domestic"}, orders=2)
+        assert sb._dependencies["orders"] == set()
+        assert all("customs_id" not in order for order in sb._generated["orders"])
+
+    def test_omitted_elements_are_dropped_from_sequences(
+        self, sb: SchemaBuilder
+    ) -> None:
+        customs = sb.schema("customs", {"id": sb.f("increment")})
+        sb.schema(
+            "declarations",
+            {
+                "id": sb.f("increment"),
+                "refs": [
+                    sb.when(sb.ref(customs).id, sb.eq("order_type", "cb")),
+                    sb.f("word"),
+                ],
+                "pair": (
+                    sb.when(sb.f("word"), sb.eq("order_type", "cb")),
+                    sb.f("word"),
+                ),
+            },
+        )
+
+        data = sb.create(
+            constants={"order_type": "domestic"}, declarations=3, customs=1
+        )
+        for row in data["declarations"]:
+            assert len(row["refs"]) == 1
+            assert len(row["pair"]) == 1
+
+    def test_condition_inside_choice_branches(self, sb: SchemaBuilder) -> None:
+        domestic = sb.schema("domestic_parents", {"id": sb.f("increment")})
+        customs = sb.schema("customs", {"id": sb.f("increment")})
+        sb.schema(
+            "orders",
+            {
+                "id": sb.f("increment"),
+                "parent_id": sb.choice(
+                    [
+                        sb.when(sb.ref(domestic).id, sb.ne("order_type", "cb")),
+                        sb.when(sb.ref(customs).id, sb.eq("order_type", "cb")),
+                    ]
+                ),
+            },
+        )
+
+        assert sb._dependencies["orders"] == {"domestic_parents", "customs"}
+        domestic_batch = sb.create(
+            constants={"order_type": "domestic"},
+            orders=5,
+            domestic_parents=2,
+        )
+        domestic_ids = {p["id"] for p in domestic_batch["domestic_parents"]}
+        for order in domestic_batch["orders"]:
+            assert order["parent_id"] in domestic_ids
+
+
+class TestChoiceDependencyAnalysis:
+    def _order_templates(self, sb: SchemaBuilder) -> tuple[SchemaRef, SchemaRef]:
+        domestic = sb.schema(
+            "domestic_parents",
+            {"id": sb.f("increment"), "code": sb.f("word")},
+        )
+        cross_border = sb.schema(
+            "cross_border_parents",
+            {"id": sb.f("increment"), "code": sb.f("word", key=str.upper)},
+        )
+        sb.schema(
+            "orders",
+            {
+                "id": sb.f("increment"),
+                "parent_id": sb.choice([sb.ref(domestic).id, sb.ref(cross_border).id]),
+            },
+        )
+        sb.schema(
+            "shipments",
+            {
+                "id": sb.f("increment"),
+                "code": sb.weighted_choice(
+                    [sb.ref(domestic).code, sb.ref(cross_border).code],
+                    [1.0, 0.0],
+                ),
+            },
+        )
+        return domestic, cross_border
+
+    def test_refs_hidden_in_choices_become_dependencies(
+        self, sb: SchemaBuilder
+    ) -> None:
+        self._order_templates(sb)
+        assert sb._dependencies["orders"] == {
+            "domestic_parents",
+            "cross_border_parents",
+        }
+        assert sb._dependencies["shipments"] == {"domestic_parents"}
+
+    def test_hidden_refs_resolve_regardless_of_kwarg_order(
+        self, sb: SchemaBuilder
+    ) -> None:
+        self._order_templates(sb)
+        data = sb.create(
+            shipments=4,
+            orders=6,
+            cross_border_parents=3,
+            domestic_parents=2,
+        )
+
+        assert list(data) == [
+            "domestic_parents",
+            "cross_border_parents",
+            "orders",
+            "shipments",
+        ]
+        parent_ids = {
+            parent["id"]
+            for table in ("domestic_parents", "cross_border_parents")
+            for parent in data[table]
+        }
+        assert all(order["parent_id"] in parent_ids for order in data["orders"])
+
+    def test_zero_weight_cycle_does_not_block_batch(self, sb: SchemaBuilder) -> None:
+        a = sb.schema("a", {"id": sb.f("increment")})
+        b = sb.schema("b", {"id": sb.f("increment")})
+        sb._schemas["a"]["maybe_b"] = sb.weighted_choice(
+            [sb.ref(b).id, None], [0.0, 1.0]
+        )
+        sb._schemas["b"]["a_id"] = sb.ref(a).id
+
+        data = sb.create(b=2, a=3)
+        assert sb._dependencies["a"] == set()
+        assert all(row["maybe_b"] is None for row in data["a"])
+
+    def test_positive_weight_cycle_fails_before_first_row(
+        self, sb: SchemaBuilder
+    ) -> None:
+        a = sb.schema("a", {"id": sb.f("increment")})
+        b = sb.schema("b", {"id": sb.f("increment")})
+        sb._schemas["a"]["b_id"] = sb.weighted_choice([sb.ref(b).id, None], [0.5, 0.5])
+        sb._schemas["b"]["a_id"] = sb.ref(a).id
+
+        with pytest.raises(ValueError, match="Circular dependency"):
+            sb.create(a=2, b=2)
+        assert sb._generated == {}
+
+    def test_output_is_identical_for_any_create_kwarg_order(self) -> None:
+        def build(reversed_order: bool) -> dict:
+            builder = SchemaBuilder(Locale.EN, seed=SEED)
+            domestic = builder.schema(
+                "domestic_parents",
+                {"id": builder.f("increment"), "code": builder.f("word")},
+            )
+            cross_border = builder.schema(
+                "cross_border_parents",
+                {"id": builder.f("increment"), "code": builder.f("word")},
+            )
+            builder.schema(
+                "orders",
+                {
+                    "id": builder.f("increment"),
+                    "parent_id": builder.choice(
+                        [builder.ref(domestic).id, builder.ref(cross_border).id]
+                    ),
+                },
+            )
+            if reversed_order:
+                return builder.create(
+                    orders=8, cross_border_parents=4, domestic_parents=3
+                )
+            return builder.create(domestic_parents=3, cross_border_parents=4, orders=8)
+
+        assert build(True) == build(False)
+
+    def test_dependency_analysis_is_structural(self, sb: SchemaBuilder) -> None:
+        domestic, cross_border = self._order_templates(sb)
+        # Repeated analysis with the same definitions must be stable and
+        # never consume random state or require generation.
+        first = dict(sb._dependencies)
+        sb._rebuild_dependencies()
+        assert sb._dependencies == first
+        assert sb._generated == {}
+        assert domestic.name == "domestic_parents"
+        assert cross_border.name == "cross_border_parents"
