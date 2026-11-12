@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name="natsort"
+authors = [
+    {name = "Seth M. Morton", email = "drtuba78@gmail.com"},
+]
+dynamic = ["version"]
+requires-python = ">=3.9"
+description = "Simple yet flexible natural sorting in Python."
+readme = "README.rst"
+license = "MIT"
+keywords = ["sort", "sorting", "natural sort", "natsort"]
+classifiers = [
+	"Development Status :: 5 - Production/Stable",
+	"Intended Audience :: Developers",
+	"Intended Audience :: Science/Research",
+	"Intended Audience :: System Administrators",
+	"Intended Audience :: Information Technology",
+	"Intended Audience :: Financial and Insurance Industry",
+	"Operating System :: OS Independent",
+	"Natural Language :: English",
+	"Programming Language :: Python",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.9",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+	"Programming Language :: Python :: 3.14",
+	"Topic :: Scientific/Engineering :: Information Analysis",
+	"Topic :: Utilities",
+	"Topic :: Text Processing",
+]
+
+[project.optional-dependencies]
+fast = ["fastnumbers >= 2.0.0"]
+icu = ["PyICU >= 1.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/SethMMorton/natsort"
+Documentation = "https://natsort.readthedocs.io/"
+Issues = "https://github.com/SethMMorton/natsort/issues"
+Changelog = "https://github.com/SethMMorton/natsort/blob/main/CHANGELOG.md"
+
+[project.scripts]
+natsort = "natsort.__main__:main"
+
+[tool.setuptools_scm]
+version_file = "natsort/_version.py"
+
+[tool.setuptools.packages]
+find = {namespaces = false}
+
+[tool.mypy]
+mypy_path = "mypy_stubs"
+
+[tool.ruff]
+target-version = "py39"
+extend-exclude = ["build", "dist", "docs", "mypy_stubs", "_version.py"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+select = ["ALL"]
+ignore = [
+	"A002",     # arguments shadow builtins
+	"RUF001",   # ambiguous-unicode-character-string
+	"COM812",   # missing trailing comma
+	"ISC001",   # single line implicit string concatenation
+	"PLR0124",  # name compared with itself (used to check for NaN)
+	"DTZ",      # flaek8-datetimez
+	"D203",     # one blank line before docstring in class
+	"D212"      # docstring on same line as quotes
+]
+# doctests = true  # enable when/if available
+
+[tool.ruff.lint.per-file-ignores]
+"natsort/__init__.py" = [
+	"PLC0414",  # useless import alias
+]
+"natsort/natsort.py" = [
+	"FBT",      # Boolean trap
+]
+"natsort/compat/__init__.py" = [
+	"D104",     # docstring required in public package
+]
+"tests/**.py" = [
+	"S101",     # use of assert
+	"D",        # docstring checks
+	"INP",      # implicit namespace package
+	"PLR2004",  # magic value comparison
+	"FBT",      # Boolean trap
+]
+"dev/bump.py" = [
+	"S603",     # validate input to subprocess.run
+	"S607",     # use full path of commands to subprocess.run
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
