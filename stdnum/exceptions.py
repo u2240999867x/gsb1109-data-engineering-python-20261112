@@ -26,7 +26,7 @@ from __future__ import annotations
 
 
 __all__ = ['ValidationError', 'InvalidFormat', 'InvalidChecksum',
-           'InvalidLength', 'InvalidComponent']
+           'InvalidLength', 'InvalidComponent', 'FragmentConflict']
 
 
 class ValidationError(ValueError):
@@ -69,3 +69,13 @@ class InvalidComponent(ValidationError):  # noqa N818
     some invalid reference."""
 
     message = 'One of the parts of the number are invalid or unknown.'
+
+
+class FragmentConflict(ValidationError):  # noqa N818
+    """Fragments covering the same position disagree.
+
+    This is raised when two fragments of the same version cover an
+    overlapping interval with different content, or when a correction does
+    not use the exact same boundaries as the interval it replaces."""
+
+    message = 'Conflicting fragments were supplied for the same position.'

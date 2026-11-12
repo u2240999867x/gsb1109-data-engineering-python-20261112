@@ -102,6 +102,7 @@ Generic check digit algorithms
    :toctree:
 
    damm
+   fragments
    iso7064
    luhn
    verhoeff
