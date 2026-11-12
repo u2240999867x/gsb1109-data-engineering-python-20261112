@@ -688,6 +688,129 @@ class AppendDiffProperties(unittest.TestCase):
         assert_json_equal(restored.apply(src), dst)
 
 
+def _wire_length(operations):
+    return len(json.dumps(operations, separators=(',', ':'),
+                          ensure_ascii=False).encode('utf-8'))
+
+
+# Documents made of objects and scalars only, where the minimum patch can be
+# enumerated exhaustively
+object_scalar_docs = st.recursive(
+    json_scalars,
+    lambda children: st.dictionaries(json_keys, children, max_size=4),
+    max_leaves=12,
+)
+
+
+def _all_object_plans(parts, src, dst):
+    """All whole-node vs per-member plans for an object/scalar document."""
+    if json.dumps(jsonpatch._sorted_members(src), sort_keys=True) == \
+            json.dumps(jsonpatch._sorted_members(dst), sort_keys=True):
+        return [[]]
+    if isinstance(src, dict) and isinstance(dst, dict):
+        plans = [[{'op': 'replace', 'path': to_pointer(parts), 'value': dst}]]
+        groups = []
+        for key in src:
+            if key not in dst:
+                groups.append([[{'op': 'remove',
+                                 'path': to_pointer(parts + [str(key)])}]])
+        for key in dst:
+            child = parts + [str(key)]
+            if key not in src:
+                groups.append([[{'op': 'add', 'path': to_pointer(child),
+                                 'value': dst[key]}]])
+            else:
+                groups.append(_all_object_plans(
+                    child, src[key], dst[key]))
+        combinations = [[]]
+        for group in groups:
+            combinations = [first + second
+                            for first in combinations for second in group]
+        return plans + combinations
+    return [[{'op': 'replace', 'path': to_pointer(parts), 'value': dst}]]
+
+
+def _minimum_object_cost(src, dst):
+    return min(_wire_length(plan)
+               for plan in _all_object_plans([], src, dst))
+
+
+class ByteCostDiffProperties(unittest.TestCase):
+
+    @given(pair=doc_pairs)
+    def test_roundtrip(self, pair):
+        src, dst = pair
+        patch = jsonpatch.JsonPatch.from_diff(src, dst, cost='bytes')
+        note(patch.patch)
+        assert_json_equal(patch.apply(src), dst)
+
+    @given(pair=pairs_of(object_scalar_docs))
+    def test_object_scalar_minimum_is_exact(self, pair):
+        src, dst = pair
+        patch = jsonpatch.JsonPatch.from_diff(src, dst, cost='bytes')
+        self.assertEqual(_wire_length(patch.patch),
+                         _minimum_object_cost(src, dst))
+
+    @given(pair=doc_pairs, window=st.integers(min_value=1, max_value=8))
+    def test_bounded_window_roundtrips(self, pair, window):
+        src, dst = pair
+        patch = jsonpatch.JsonPatch.from_diff(
+            src, dst, cost='bytes', array_window=window)
+        assert_json_equal(patch.apply(src), dst)
+
+    @given(pair=doc_pairs)
+    def test_larger_window_never_costs_more(self, pair):
+        src, dst = pair
+        small = jsonpatch.JsonPatch.from_diff(
+            src, dst, cost='bytes', array_window=1)
+        large = jsonpatch.JsonPatch.from_diff(
+            src, dst, cost='bytes', array_window=8)
+        self.assertLessEqual(
+            jsonpatch.patch_wire_size(large),
+            jsonpatch.patch_wire_size(small))
+
+    @given(pair=doc_pairs)
+    def test_restricting_unchanged_location_never_leaks(self, pair):
+        src, dst = pair
+        dst_locations = set(locations(dst))
+        # Only object-key locations have stable paths across a diff; array
+        # indices shift as operations apply, so restricting those is covered
+        # by the explicit array-index examples in tests.py.
+        unchanged = [
+            parts for parts in locations(src)
+            if parts and all(isinstance(part, str) for part in parts)
+            and parts in dst_locations
+            and json_equal(resolve(src, parts), resolve(dst, parts))
+        ]
+        if not unchanged:
+            return
+        parts = unchanged[0]
+        pointer = to_pointer(parts)
+        try:
+            patch = jsonpatch.JsonPatch.from_diff(
+                src, dst, cost='bytes', restricted=[pointer])
+        except jsonpatch.RestrictedValueError:
+            return
+        note(patch.patch)
+
+        def is_restricted_target(path):
+            return path == pointer or path.startswith(pointer + '/')
+
+        def is_ancestor_of_restricted(path):
+            return path != pointer and (
+                not path or pointer.startswith(path + '/'))
+
+        for operation in patch:
+            path = operation['path']
+            # the restricted subtree is never targeted directly
+            self.assertFalse(is_restricted_target(path))
+            # an ancestor is never replaced with a payload that would carry
+            # the restricted node along with it
+            if is_ancestor_of_restricted(path):
+                self.assertNotIn('value', operation)
+        assert_json_equal(patch.apply(src), dst)
+
+
 PatchOperationTests = PatchOperationMachine.TestCase
 
 

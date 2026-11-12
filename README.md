@@ -33,6 +33,33 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Byte-cost diffs
+---------------
+`JsonPatch.from_diff()` normally minimizes the number of operations. When a
+subscriber bills each patch by its UTF-8 wire length instead, pass
+`cost='bytes'` to minimize the number of bytes on the wire.
+
+At every object the builder chooses between replacing the whole node and
+fixing its members separately, whichever serializes shorter. For arrays it
+reuses equal, contiguous runs of items and combines adds, removes and
+replacements between them, searching every alignment within a bounded window
+(`array_window`, default 8); longer runs fall back to a positional diff. On
+documents made only of objects and scalars the result is the exact minimum.
+
+`restricted` takes JSON pointers of columns that are not authorized in the
+patch payload. A restricted value is never sent, not even inside an ancestor
+replacement; if the target cannot be reached without it,
+`RestrictedValueError` is raised.
+
+    >>> patch = JsonPatch.from_diff(src, dst, cost='bytes',
+    ...                             restricted=['/ssn'])
+    >>> patch.apply(src) == dst
+    True
+
+`patch_wire_size()` and `patch_wire_sizes()` report the UTF-8 bytes a patch
+uses overall and per operation, so the transmission volume can be reviewed
+after replaying the patch.
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as

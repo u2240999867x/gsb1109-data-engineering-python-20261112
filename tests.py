@@ -4051,6 +4051,327 @@ class StandardAppendIsolationTests(unittest.TestCase):
                          {'message': 'canonical'})
 
 
+def _wire_length(operations):
+    return len(json.dumps(operations, separators=(',', ':'),
+                          ensure_ascii=False).encode('utf-8'))
+
+
+def _json_key(value):
+    return json.dumps(jsonpatch._sorted_members(value), sort_keys=True)
+
+
+def _all_byte_plans(parts, src, dst):
+    """Every patch in the candidate family the byte-cost builder chooses from.
+
+    Objects may be replaced whole or fixed member by member, and arrays may
+    keep equal items or add, remove and replace (recursing into paired items).
+    Paths are absolute JSON pointers, so an assembled plan can be applied to
+    the root document to check that it really reaches dst.
+    """
+    if _json_key(src) == _json_key(dst):
+        return [[]]
+    if isinstance(src, dict) and isinstance(dst, dict):
+        plans = [[{'op': 'replace', 'path': jsonpatch.path_join(parts),
+                   'value': dst}]]
+        groups = []
+        for key in src:
+            if key not in dst:
+                groups.append([[{'op': 'remove',
+                                 'path': jsonpatch.path_join(parts + [str(key)])}]])
+        for key in dst:
+            child_parts = parts + [str(key)]
+            if key not in src:
+                groups.append([[{'op': 'add',
+                                 'path': jsonpatch.path_join(child_parts),
+                                 'value': dst[key]}]])
+            else:
+                groups.append(_all_byte_plans(
+                    child_parts, src[key], dst[key]))
+        combinations = [[]]
+        for group in groups:
+            combinations = [first + second
+                            for first in combinations for second in group]
+        return plans + combinations
+    if isinstance(src, list) and isinstance(dst, list):
+        return _all_array_plans(parts, src, dst)
+    return [[{'op': 'replace', 'path': jsonpatch.path_join(parts),
+              'value': dst}]]
+
+
+def _all_array_plans(parts, src, dst):
+    full = jsonpatch.path_join(parts)
+    plans = []
+
+    def visit(i, j, operations):
+        if i == len(src) and j == len(dst):
+            plans.append(list(operations))
+            return
+        if j < len(dst):
+            visit(i, j + 1, operations + [
+                {'op': 'add', 'path': full + '/' + str(j), 'value': dst[j]}])
+        if i < len(src):
+            visit(i + 1, j, operations + [
+                {'op': 'remove', 'path': full + '/' + str(j)}])
+        if i < len(src) and j < len(dst):
+            if _json_key(src[i]) == _json_key(dst[j]):
+                visit(i + 1, j + 1, operations)
+            else:
+                for child in _all_byte_plans(parts + [j], src[i], dst[j]):
+                    visit(i + 1, j + 1, operations + child)
+
+    visit(0, 0, [])
+    return plans
+
+
+def _minimum_byte_cost(src, dst):
+    costs = []
+    for plan in _all_byte_plans([], src, dst):
+        result = jsonpatch.JsonPatch(plan).apply(src)
+        if _json_key(result) == _json_key(dst):
+            costs.append(_wire_length(plan))
+    return min(costs)
+
+
+class ByteCostDiffTests(unittest.TestCase):
+
+    def assert_roundtrips(self, src, dst, **kwargs):
+        patch = jsonpatch.JsonPatch.from_diff(
+            src, dst, cost='bytes', **kwargs)
+        self.assertEqual(patch.apply(copy.deepcopy(src)), dst)
+        return patch
+
+    def test_default_mode_is_unchanged(self):
+        src, dst = {'a': [1, 2, 3]}, {'a': [1, 3]}
+        patch = jsonpatch.JsonPatch.from_diff(src, dst)
+        self.assertEqual(patch.patch,
+                         [{'op': 'remove', 'path': '/a/1'}])
+
+    def test_unknown_cost_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            jsonpatch.JsonPatch.from_diff({}, {}, cost='words')
+
+    def test_array_window_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            jsonpatch.JsonPatch.from_diff([1], [1], cost='bytes',
+                                          array_window=0)
+
+    def test_equal_documents_produce_no_operations(self):
+        for doc in ({'a': [1, {'b': 2}]}, [1, 2, 3], 'scalar', None):
+            self.assertEqual(
+                jsonpatch.JsonPatch.from_diff(
+                    copy.deepcopy(doc), copy.deepcopy(doc),
+                    cost='bytes').patch, [])
+
+    def test_object_prefers_single_member_replace(self):
+        patch = self.assert_roundtrips(
+            {'a': 1, 'b': 2}, {'a': 1, 'b': 3})
+        self.assertEqual(patch.patch,
+                         [{'op': 'replace', 'path': '/b', 'value': 3}])
+
+    def test_object_prefers_whole_node_replace_when_cheaper(self):
+        # Many small changes make one whole-object replacement shorter than
+        # a replacement per member.
+        src = {'a': 1, 'b': 2, 'c': 3, 'd': 4}
+        dst = {'a': 9, 'b': 8, 'c': 7, 'd': 6}
+        patch = self.assert_roundtrips(src, dst)
+        self.assertEqual(len(patch.patch), 1)
+        self.assertEqual(patch.patch[0]['op'], 'replace')
+        self.assertEqual(patch.patch[0]['path'], '')
+        self.assertEqual(patch.patch[0]['value'], dst)
+
+    def test_added_and_removed_members(self):
+        # A large unchanged member makes fixing the members cheaper than
+        # resending the whole object.
+        shared = 'x' * 40
+        src = {'keep': shared, 'gone': 2}
+        dst = {'keep': shared, 'added': 3}
+        patch = self.assert_roundtrips(src, dst)
+        self.assertEqual(
+            sorted((op['op'], op['path']) for op in patch),
+            [('add', '/added'), ('remove', '/gone')])
+
+    def test_arrays_reuse_equal_runs_and_combine_edits(self):
+        # The equal 3 and 4 at the end are reused; only the head changes.
+        patch = self.assert_roundtrips(
+            [1, 2, 3, 4], [9, 2, 3, 4])
+        self.assertEqual(patch.patch,
+                         [{'op': 'replace', 'path': '/0', 'value': 9}])
+        # A rotation reuses every value instead of resending them: the patch
+        # only moves items around, it sends no replacement values.
+        patch = self.assert_roundtrips([1, 2, 3], [3, 1, 2])
+        self.assertTrue(all(op['op'] in ('add', 'remove') for op in patch))
+        self.assertTrue(all('value' not in op
+                            for op in patch if op['op'] == 'remove'))
+
+    def test_array_matches_exhaustive_minimum(self):
+        cases = [
+            ([2, 0, 1], [0, 'b', 2]),
+            ([True, 2, None, 'a'], [None, 2, 2]),
+            ([0, 1, None], [True],),
+            ([1, None, 2], [True, None, None, 1]),
+            ([], [1, 2]),
+            ([1, 2], []),
+            ([1, True], [True, 1]),
+        ]
+        for src, dst in cases:
+            with self.subTest(src=src, dst=dst):
+                patch = self.assert_roundtrips(src, dst)
+                self.assertEqual(_wire_length(patch.patch),
+                                 _minimum_byte_cost(src, dst))
+
+    def test_nested_documents_match_exhaustive_minimum(self):
+        documents = [
+            ([["a", 0], True, True], [["a", "a"], {"b": "a"}, 0]),
+            ({'rows': [{'id': 1}, {'id': 2}]},
+             {'rows': [{'id': 1, 'x': 9}, {'id': 2}]}),
+            ({'a': {'b': [1, 2]}}, {'a': {'b': [1, 2, 3]}}),
+        ]
+        for src, dst in documents:
+            with self.subTest(src=src, dst=dst):
+                patch = self.assert_roundtrips(src, dst)
+                self.assertEqual(_wire_length(patch.patch),
+                                 _minimum_byte_cost(src, dst))
+
+    def test_distinguished_json_types_are_not_reused(self):
+        # 1 and True are different JSON values, so the item is replaced.
+        patch = self.assert_roundtrips([1], [True])
+        self.assertEqual(patch.patch,
+                         [{'op': 'replace', 'path': '/0', 'value': True}])
+
+    def test_utf8_bytes_not_characters_are_charged(self):
+        ascii_patch = jsonpatch.JsonPatch.from_diff(
+            {'k': 'a'}, {'k': 'b'}, cost='bytes')
+        unicode_patch = jsonpatch.JsonPatch.from_diff(
+            {'k': 'a'}, {'k': '中'}, cost='bytes')
+        # The multibyte character costs more UTF-8 bytes than the ASCII one.
+        self.assertGreater(jsonpatch.patch_wire_size(unicode_patch),
+                           jsonpatch.patch_wire_size(ascii_patch))
+        self.assertEqual(
+            jsonpatch.patch_wire_size(unicode_patch),
+            len(unicode_patch.to_string(
+                dumps=lambda value: json.dumps(
+                    value, separators=(',', ':'), ensure_ascii=False))
+                .encode('utf-8')))
+
+    def test_window_fallback_still_reaches_target(self):
+        src = list(range(12))
+        dst = [99] + list(range(1, 11)) + [77]
+        for window in (1, 2, 8):
+            with self.subTest(window=window):
+                patch = self.assert_roundtrips(src, dst, array_window=window)
+                self.assertTrue(all(op['op'] in
+                                    ('add', 'remove', 'replace')
+                                    for op in patch))
+
+    def test_larger_window_never_costs_more(self):
+        src = [9, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        dst = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        small = self.assert_roundtrips(src, dst, array_window=1)
+        large = self.assert_roundtrips(src, dst, array_window=8)
+        self.assertLessEqual(jsonpatch.patch_wire_size(large),
+                             jsonpatch.patch_wire_size(small))
+
+    def test_restricted_unchanged_member_is_never_sent(self):
+        src = {'secret': 'do-not-send', 'open': 1}
+        dst = {'secret': 'do-not-send', 'open': 2}
+        patch = self.assert_roundtrips(src, dst, restricted=['/secret'])
+        self.assertNotIn('do-not-send', patch.to_string())
+        self.assertNotIn('/secret', patch.to_string())
+
+    def test_restricted_member_blocks_ancestor_replacement(self):
+        # A whole-object replacement would carry the restricted column, so it
+        # must not be chosen even though it would otherwise be shorter.
+        src = {'secret': 'S', 'a': 1, 'b': 2, 'c': 3}
+        dst = {'secret': 'S', 'a': 9, 'b': 8, 'c': 7}
+        patch = self.assert_roundtrips(src, dst, restricted=['/secret'])
+        self.assertNotIn('S', patch.to_string())
+        self.assertTrue(all(op['path'] != '' for op in patch))
+        for operation in patch:
+            self.assertFalse(operation['path'].startswith('/secret'))
+
+    def test_changed_restricted_member_cannot_be_expressed(self):
+        with self.assertRaises(jsonpatch.RestrictedValueError):
+            jsonpatch.JsonPatch.from_diff(
+                {'secret': 'old'}, {'secret': 'new'},
+                cost='bytes', restricted=['/secret'])
+
+    def test_restricted_array_index(self):
+        src = {'rows': [{'id': 1, 'ssn': 'X'}, {'id': 2, 'ssn': 'Y'}]}
+        dst = {'rows': [{'id': 1, 'ssn': 'X'},
+                        {'id': 2, 'ssn': 'Y', 'note': 'n'}]}
+        patch = self.assert_roundtrips(src, dst,
+                                       restricted=['/rows/1/ssn'])
+        self.assertNotIn('ssn', patch.to_string())
+        # Changing the restricted scalar itself cannot be represented.
+        with self.assertRaises(jsonpatch.RestrictedValueError):
+            jsonpatch.JsonPatch.from_diff(
+                src, {'rows': [{'id': 1, 'ssn': 'X'},
+                               {'id': 2, 'ssn': 'Z'}]},
+                cost='bytes', restricted=['/rows/1/ssn'])
+
+    def test_test_operations_do_not_leak_restricted_values(self):
+        patch = self.assert_roundtrips(
+            {'secret': 'S', 'keep': 1}, {'keep': 1},
+            restricted=['/secret'], generate_test_ops=True)
+        self.assertNotIn('S', patch.to_string())
+
+    def test_generate_test_ops_precede_changes(self):
+        src = {'a': 1, 'b': [1, 2]}
+        dst = {'a': 2, 'b': [1, 3]}
+        patch = self.assert_roundtrips(src, dst, generate_test_ops=True)
+        operations = list(patch)
+        self.assertIn('test', [op['op'] for op in operations])
+        for index, operation in enumerate(operations):
+            if operation['op'] in ('remove', 'replace'):
+                self.assertGreater(index, 0)
+                self.assertEqual(operations[index - 1]['op'], 'test')
+                self.assertEqual(operations[index - 1]['path'],
+                                 operation['path'])
+
+    def test_custom_pointer_class(self):
+        class CustomPointer(jsonpatch.JsonPointer):
+            pass
+
+        patch = jsonpatch.JsonPatch.from_diff(
+            {'a': [1, 2]}, {'a': [1, 3]}, cost='bytes',
+            pointer_cls=CustomPointer)
+        self.assertTrue(
+            all(isinstance(op.pointer, CustomPointer) for op in patch._ops))
+        self.assertEqual(patch.apply({'a': [1, 2]}), {'a': [1, 3]})
+
+    def test_wire_size_accounting(self):
+        # A multi-operation diff, with a large unchanged member so the builder
+        # fixes members rather than replacing the whole object.
+        shared = 'x' * 40
+        patch = jsonpatch.JsonPatch.from_diff(
+            {'keep': shared, 'gone': 2}, {'keep': shared, 'added': 3},
+            cost='bytes')
+        self.assertGreater(len(patch.patch), 1)
+        serialized = json.dumps(patch.patch, separators=(',', ':'),
+                                ensure_ascii=False).encode('utf-8')
+        self.assertEqual(jsonpatch.patch_wire_size(patch), len(serialized))
+        per_operation = jsonpatch.patch_wire_sizes(patch)
+        self.assertEqual(len(per_operation), len(patch.patch))
+        # each per-op count carries one separating comma; the patch has one
+        # fewer comma, while the surrounding brackets add two bytes, so the
+        # total is exactly one byte more than the sum of the per-op sizes
+        self.assertEqual(jsonpatch.patch_wire_size(patch),
+                         sum(per_operation) + 1)
+        # raw operation lists and an empty patch are accepted as well
+        self.assertEqual(jsonpatch.patch_wire_size(patch.patch),
+                         jsonpatch.patch_wire_size(patch))
+        self.assertEqual(jsonpatch.patch_wire_sizes([]), [])
+        self.assertEqual(jsonpatch.patch_wire_size([]), 2)
+
+    def test_append_class_byte_mode_uses_rfc_operations(self):
+        patch = jsonpatch.JsonPatchWithAppend.from_diff(
+            {'m': 'abc'}, {'m': 'abcdef'}, cost='bytes')
+        self.assertIsInstance(patch, jsonpatch.JsonPatchWithAppend)
+        self.assertTrue(all(op['op'] in ('add', 'remove', 'replace')
+                            for op in patch))
+        self.assertEqual(patch.apply({'m': 'abc'}), {'m': 'abcdef'})
+
+
 def load_tests(loader, tests, pattern):
     """ Adds the doctests of jsonpatch to the tests of this module """
     tests.addTests(doctest.DocTestSuite(jsonpatch))

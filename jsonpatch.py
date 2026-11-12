@@ -217,6 +217,59 @@ def make_patch(src, dst, pointer_cls=JsonPointer, generate_test_ops=False):
                                generate_test_ops=generate_test_ops)
 
 
+def _wire_dumps(value):
+    """The compact, UTF-8 wire form of a patch or operation, as charged by
+    subscribers: no insignificant whitespace and no ASCII escaping."""
+    return json.dumps(value, separators=(',', ':'),
+                      ensure_ascii=False).encode('utf-8')
+
+
+def patch_wire_size(patch):
+    """The UTF-8 wire length of a patch, in bytes.
+
+    The patch is serialized as compact JSON, the form the ``cost='bytes'``
+    mode of :meth:`JsonPatch.from_diff` minimizes. This lets a caller verify
+    how much transmission volume a generated patch uses.
+
+    :param patch: A :class:`JsonPatch` or an iterable of operation dicts.
+    :type patch: JsonPatch or iterable
+
+    :return: The number of UTF-8 bytes of the serialized patch.
+    :rtype: int
+
+    >>> patch = JsonPatch([{'op': 'remove', 'path': '/foo'}])
+    >>> patch_wire_size(patch)
+    31
+    """
+    if isinstance(patch, JsonPatch):
+        operations = patch.patch
+    else:
+        operations = list(patch)
+    return len(_wire_dumps(operations))
+
+
+def patch_wire_sizes(patch):
+    """The UTF-8 bytes each operation of a patch contributes on the wire.
+
+    An operation is charged for its compact JSON and for the comma that
+    separates it from the next operation, so for a non-empty patch
+    :func:`patch_wire_size` equals the sum of these sizes plus one byte (the
+    surrounding brackets add two bytes while one separating comma is counted
+    in excess).
+
+    :param patch: A :class:`JsonPatch` or an iterable of operation dicts.
+    :type patch: JsonPatch or iterable
+
+    :return: One byte count per operation, in the patch's order.
+    :rtype: list[int]
+    """
+    if isinstance(patch, JsonPatch):
+        operations = patch.patch
+    else:
+        operations = list(patch)
+    return [len(_wire_dumps(operation)) + 1 for operation in operations]
+
+
 def path_split(path, pointer_cls=JsonPointer):
     """Splits the ``path`` (or ``from``) of an operation into its parts.
 
@@ -1007,6 +1060,7 @@ class JsonPatch:
     def from_diff(
             cls, src, dst, optimization=True, dumps=None,
             pointer_cls=JsonPointer, generate_test_ops=False,
+            cost=None, restricted=None, array_window=None,
     ):
         """Creates JsonPatch instance based on comparison of two document
         objects. Json patch would be created for `src` argument against `dst`
@@ -1041,6 +1095,36 @@ class JsonPatch:
                                   fails on documents that differ from `src` there.
         :type generate_test_ops: bool
 
+        :param cost: Set to ``'bytes'`` to minimize the UTF-8 wire length of
+                     the serialized patch. At every object it then chooses
+                     between replacing the whole node and fixing its members
+                     separately, while arrays reuse equal, contiguous runs of
+                     items and combine the adds, removes and replacements
+                     between them. The minimum is exact for documents made of
+                     objects and scalars; for nested arrays it is found within
+                     `array_window`. Without it, the standard diff that
+                     minimizes the number of operations is used.
+        :type cost: str or None
+
+        :param restricted: JSON pointers of members that are not authorized
+                           to appear in the patch payload. Their values are
+                           only sent where they change, in the smallest
+                           surrounding operation that does not contain them; a
+                           restricted value that is equal in `src` and `dst`
+                           is never sent, not even as part of an ancestor
+                           replacement. Only takes effect with
+                           ``cost='bytes'``.
+        :type restricted: Iterable[str] or None
+
+        :param array_window: Maximum length of the differing run of an array,
+                             after reusing its equal start and end, for which
+                             every add/remove/replace alignment is searched.
+                             Within a run no longer than this the optimal patch
+                             is found; longer runs fall back to matching items
+                             by position. Defaults to
+                             :data:`_BYTE_DIFF_ARRAY_WINDOW`.
+        :type array_window: int or None
+
         :return: :class:`JsonPatch` instance.
 
         >>> src = {'foo': 'bar', 'numbers': [1, 3, 4, 8]}
@@ -1051,11 +1135,10 @@ class JsonPatch:
         True
         """
         json_dumper = dumps or cls.json_dumper
-        builder = DiffBuilder(src, dst, json_dumper, pointer_cls=pointer_cls,
-                              optimization=optimization,
-                              generate_test_ops=generate_test_ops)
-        builder._compare_values((), None, src, dst)
-        ops = copy.deepcopy(list(builder.execute()))
+        ops = _build_diff_operations(
+            src, dst, json_dumper, pointer_cls, optimization,
+            generate_test_ops, cost, restricted, array_window)
+        ops = copy.deepcopy(ops)
         return cls(ops, pointer_cls=pointer_cls)
 
     def to_string(self, dumps=None):
@@ -1162,21 +1245,54 @@ class JsonPatchWithAppend(JsonPatch):
 
     @classmethod
     def from_diff(cls, src, dst, optimization=True, dumps=None,
-                  pointer_cls=JsonPointer, generate_test_ops=False):
+                  pointer_cls=JsonPointer, generate_test_ops=False,
+                  cost=None, restricted=None, array_window=None):
         """Creates a patch, using append for string growth in object members.
 
         Root strings and scalar array elements retain standard diff behavior.
         Options follow JsonPatch.from_diff; optimization=False disables moves,
         while append remains enabled. With generate_test_ops=True, an append
         is preceded by a test of the original string.
+
+        With ``cost='bytes'`` the byte-minimizing builder of
+        :meth:`JsonPatch.from_diff` is used, which emits only RFC operations
+        (add, remove and replace), so no append operation is generated in that
+        mode.
         """
         json_dumper = dumps or cls.json_dumper
-        builder = _AppendDiffBuilder(src, dst, json_dumper, pointer_cls=pointer_cls,
-                                     optimization=optimization,
-                                     generate_test_ops=generate_test_ops)
-        builder._compare_values((), None, src, dst)
-        ops = copy.deepcopy(list(builder.execute()))
+        if cost is None:
+            builder = _AppendDiffBuilder(
+                src, dst, json_dumper, pointer_cls=pointer_cls,
+                optimization=optimization,
+                generate_test_ops=generate_test_ops)
+            builder._compare_values((), None, src, dst)
+            ops = list(builder.execute())
+        else:
+            ops = _build_diff_operations(
+                src, dst, json_dumper, pointer_cls, optimization,
+                generate_test_ops, cost, restricted, array_window)
+        ops = copy.deepcopy(ops)
         return cls(ops, pointer_cls=pointer_cls)
+
+
+def _build_diff_operations(src, dst, dumps, pointer_cls, optimization,
+                           generate_test_ops, cost, restricted, array_window):
+    """Builds the operations of a diff in the requested cost mode."""
+    if cost is None:
+        builder = DiffBuilder(src, dst, dumps, pointer_cls=pointer_cls,
+                              optimization=optimization,
+                              generate_test_ops=generate_test_ops)
+        builder._compare_values((), None, src, dst)
+        return list(builder.execute())
+    if cost == 'bytes':
+        builder = _ByteDiffBuilder(
+            src, dst, dumps, pointer_cls=pointer_cls,
+            optimization=optimization,
+            generate_test_ops=generate_test_ops,
+            restricted=restricted, array_window=array_window)
+        return builder.build()
+    raise ValueError(
+        "Unknown cost mode {0!r}; use None or 'bytes'".format(cost))
 
 
 class DiffBuilder:
@@ -1546,6 +1662,315 @@ class _AppendDiffBuilder(DiffBuilder):
                          'value': item[len(old_item):]})
         else:
             super()._item_replaced(path, key, item, old_item)
+
+
+# Default bound of the exhaustive search between reused runs of array items
+_BYTE_DIFF_ARRAY_WINDOW = 8
+
+
+class RestrictedValueError(JsonPatchException):
+    """Raised when a byte-cost diff cannot reach the target document without
+    putting a restricted value into the patch payload."""
+
+
+class _ByteDiffBuilder:
+    """Builds the patch with the shortest UTF-8 wire length for the
+    ``cost='bytes'`` mode of :meth:`JsonPatch.from_diff`.
+
+    Operations are built with JSON-pointer parts instead of strings, which are
+    turned into paths only once the shortest plan has been chosen.
+    """
+
+    def __init__(self, src_doc, dst_doc, dumps=json.dumps,
+                 pointer_cls=JsonPointer, optimization=True,
+                 generate_test_ops=False, restricted=None,
+                 array_window=None):
+        self.dumps = dumps
+        self.pointer_cls = pointer_cls
+        self.generate_test_ops = generate_test_ops
+        self.array_window = (_BYTE_DIFF_ARRAY_WINDOW if array_window is None
+                             else array_window)
+        if self.array_window < 1:
+            raise ValueError('array_window must be at least 1')
+        # The members that are not authorized in the patch payload, as the
+        # parts of their JSON pointers
+        self.restricted = () if restricted is None else tuple(
+            tuple(pointer_cls(pointer).parts) for pointer in restricted)
+        self.src_doc = src_doc
+        self.dst_doc = dst_doc
+
+    def build(self):
+        """Returns the shortest operations that turn src_doc into dst_doc."""
+        plan = self._node_plan((), self.src_doc, self.dst_doc)
+        return [self._serialize(operation) for operation in plan]
+
+    def _serialize(self, operation):
+        """Turns the pointer parts of an operation into JSON-pointer paths."""
+        result = dict(operation)
+        result['path'] = path_join(result['path'], self.pointer_cls)
+        return result
+
+    def _wire_form(self, operation):
+        """The operation as it is sent, with its parts joined into a JSON
+        pointer, so costs match the actual wire bytes."""
+        rendered = dict(operation)
+        rendered['path'] = path_join(rendered['path'], self.pointer_cls)
+        return rendered
+
+    def _plan_cost(self, plan):
+        """The UTF-8 wire length of a serialized patch plan."""
+        return len(_wire_dumps([self._wire_form(operation)
+                                for operation in plan]))
+
+    def _op_weight(self, operation):
+        """The bytes an operation adds to a non-empty patch: its compact JSON
+        plus the comma that separates it from the next operation."""
+        return len(_wire_dumps(self._wire_form(operation))) + 1
+
+    def _plan_weight(self, plan):
+        return sum(self._op_weight(operation) for operation in plan)
+
+    @staticmethod
+    def _same_part(left, right):
+        """Whether an internal path part matches a JSON-pointer part. Array
+        indices are stored as ints internally but as strings in a pointer."""
+        return left == right or str(left) == right
+
+    def _is_restricted(self, parts):
+        """Whether the value at parts is a restricted member, lies inside one
+        or is an ancestor whose replacement would carry one along."""
+        return any(all(self._same_part(part, pointer_part)
+                       for part, pointer_part in zip(parts, pointer))
+                   for pointer in self.restricted)
+
+    def _payload_allowed(self, parts):
+        """Whether the value at parts may be sent as the value of an
+        operation.
+
+        A restricted member cannot be sent, and neither can an ancestor
+        replacement that would carry a restricted member along with it.
+        Operations below a restricted member do not contain the member's
+        value, so only the member itself and its ancestors are blocked.
+        """
+        return not self._is_restricted(parts)
+
+    def _test_op(self, parts, value):
+        return {'op': 'test', 'path': parts, 'value': value}
+
+    def _replace_op(self, parts, old, new):
+        if not self._payload_allowed(parts):
+            raise RestrictedValueError(
+                "the value at {0!r} is restricted and cannot be sent"
+                .format(path_join(parts, self.pointer_cls)))
+        operation = {'op': 'replace', 'path': parts, 'value': new}
+        if self.generate_test_ops:
+            return [self._test_op(parts, old), operation]
+        return [operation]
+
+    def _add_op(self, parts, value):
+        if not self._payload_allowed(parts):
+            raise RestrictedValueError(
+                "the value at {0!r} is restricted and cannot be sent"
+                .format(path_join(parts, self.pointer_cls)))
+        return [{'op': 'add', 'path': parts, 'value': value}]
+
+    def _remove_op(self, parts, old):
+        operation = {'op': 'remove', 'path': parts}
+        if self.generate_test_ops and self._payload_allowed(parts):
+            return [self._test_op(parts, old), operation]
+        return [operation]
+
+    def _node_plan(self, path, src, dst):
+        """The shortest plan turning src into dst, the value at path."""
+        try:
+            equal = self.dumps(_sorted_members(src)) == \
+                self.dumps(_sorted_members(dst))
+        except (TypeError, ValueError, RecursionError):
+            # Values that cannot be serialized are treated as different
+            equal = False
+        if equal:
+            return []
+
+        if isinstance(src, MutableMapping) and isinstance(dst, MutableMapping):
+            return self._dict_plan(path, src, dst)
+
+        if isinstance(src, MutableSequence) and isinstance(dst, MutableSequence):
+            return self._list_plan(path, src, dst)
+
+        return self._replace_op(path, src, dst)
+
+    def _dict_plan(self, path, src, dst):
+        """Chooses between replacing the whole object and fixing its members
+        separately, whichever is shorter on the wire."""
+        options = []
+
+        # Option 1: replace the whole node, only legal if its payload carries
+        # no restricted member
+        if self._payload_allowed(path):
+            options.append(self._replace_op(path, src, dst))
+
+        # Option 2: one operation (or a short sub-plan) per changed member
+        member_plan = []
+        for key in src:
+            if key not in dst:
+                member_plan.extend(
+                    self._remove_op(path + (str(key),), src[key]))
+        for key in dst:
+            member_path = path + (str(key),)
+            if key not in src:
+                member_plan.extend(self._add_op(member_path, dst[key]))
+            else:
+                member_plan.extend(
+                    self._node_plan(member_path, src[key], dst[key]))
+        options.append(member_plan)
+
+        return min(options, key=self._plan_cost)
+
+    def _list_plan(self, path, src, dst):
+        """The shortest plan for an array.
+
+        The equal items at the common start and end are reused for free. The
+        run between them is solved by an exhaustive edit-graph search as long
+        as it fits into array_window, combining adds, removes and
+        replacements (which themselves recurse into the items); a longer run,
+        or one with items that cannot be serialized, falls back to comparing
+        items by position.
+        """
+        try:
+            # Serialized like DiffBuilder._differing_runs, so e.g. 1 and True
+            # differ, but independent of the order of object members
+            src_keys = [self.dumps(_sorted_members(item)) for item in src]
+            dst_keys = [self.dumps(_sorted_members(item)) for item in dst]
+        except (TypeError, ValueError, RecursionError):
+            return self._positional_region(
+                path, src, dst, 0, len(src), 0, len(dst))
+
+        shorter = min(len(src), len(dst))
+        start = 0
+        while start < shorter and src_keys[start] == dst_keys[start]:
+            start += 1
+        common_end = 0
+        while common_end < shorter - start and \
+                src_keys[-1 - common_end] == dst_keys[-1 - common_end]:
+            common_end += 1
+        i2, j2 = len(src) - common_end, len(dst) - common_end
+
+        if max(i2 - start, j2 - start) <= self.array_window:
+            return self._region_plan(
+                path, src, dst, start, i2, start, j2, src_keys, dst_keys)
+        return self._positional_region(
+            path, src, dst, start, i2, start, j2)
+
+    def _region_plan(self, path, src, dst, i1, i2, j1, j2,
+                     src_keys, dst_keys):
+        """The shortest plan for one bounded differing run.
+
+        An exhaustive edit graph over src[i1:i2] and dst[j1:j2]: equal items
+        may be kept, every other item is added, removed or paired with the
+        item at the same index, with pair plans recursing into nested values.
+        Every alignment is weighted by its UTF-8 bytes, so the cheapest one is
+        chosen rather than the one that matches the most items.
+        """
+        n, m = i2 - i1, j2 - j1
+
+        # table[x][y]: (weight, previous y, kind, payload) for turning
+        # src[i1:i1+x] into dst[j1:j1+y]
+        table = [[None] * (m + 1) for _ in range(n + 1)]
+        table[0][0] = (0, -1, 'start', None)
+
+        def consider(x, y, candidate):
+            current = table[x][y]
+            if current is None or candidate[0] < current[0]:
+                table[x][y] = candidate
+
+        for x in range(n + 1):
+            for y in range(m + 1):
+                if x == 0 and y == 0:
+                    continue
+
+                # add dst[j1+y-1] at the current end of the array, j1+y-1
+                if y > 0 and table[x][y - 1] is not None:
+                    try:
+                        operation = self._add_op(
+                            path + (j1 + y - 1,), dst[j1 + y - 1])
+                    except RestrictedValueError:
+                        pass
+                    else:
+                        consider(x, y, (
+                            table[x][y - 1][0] + self._plan_weight(operation),
+                            y - 1, 'add', operation))
+
+                # remove src[i1+x-1], currently at index j1+y
+                if x > 0 and table[x - 1][y] is not None:
+                    operation = self._remove_op(
+                        path + (j1 + y,), src[i1 + x - 1])
+                    consider(x, y, (
+                        table[x - 1][y][0] + self._plan_weight(operation),
+                        y, 'remove', operation))
+
+                if x > 0 and y > 0 and table[x - 1][y - 1] is not None:
+                    if src_keys[i1 + x - 1] == dst_keys[j1 + y - 1]:
+                        # reuse the equal item instead of sending it
+                        consider(x, y, (table[x - 1][y - 1][0],
+                                        y - 1, 'keep', None))
+                    else:
+                        paired = self._paired_plan(
+                            path + (j1 + y - 1,),
+                            src[i1 + x - 1], dst[j1 + y - 1])
+                        if paired is not None:
+                            consider(x, y, (
+                                table[x - 1][y - 1][0]
+                                + self._plan_weight(paired),
+                                y - 1, 'pair', paired))
+
+        if table[n][m] is None:
+            raise RestrictedValueError(
+                "the target array at {0!r} cannot be reached without sending "
+                "a restricted value".format(
+                    path_join(path, self.pointer_cls)))
+
+        plan = []
+        x, y = n, m
+        transitions = []
+        while table[x][y][2] != 'start':
+            _weight, previous_y, kind, payload = table[x][y]
+            transitions.append((kind, payload))
+            if kind == 'add':
+                y = previous_y
+            elif kind == 'remove':
+                x -= 1
+            else:
+                x, y = x - 1, previous_y
+        for kind, payload in reversed(transitions):
+            if kind != 'keep':
+                plan.extend(payload)
+        return plan
+
+    def _paired_plan(self, path, old, new):
+        """The plan for an old and a new array item paired at the same index,
+        or None if pairing them would send a restricted value."""
+        try:
+            return self._node_plan(path, old, new)
+        except RestrictedValueError:
+            return None
+
+    def _positional_region(self, path, src, dst, i1, i2, j1, j2):
+        """The fallback for a region larger than the search window, or items
+        that cannot be serialized: pair items by position, then remove the
+        leftover source items and append the leftover target items."""
+        plan = []
+        src_count, dst_count = i2 - i1, j2 - j1
+        paired = min(src_count, dst_count)
+        for offset in range(paired):
+            plan.extend(self._node_plan(
+                path + (j1 + offset,), src[i1 + offset], dst[j1 + offset]))
+        for offset in range(paired, src_count):
+            plan.extend(self._remove_op(
+                path + (j1 + paired,), src[i1 + offset]))
+        for offset in range(paired, dst_count):
+            plan.extend(self._add_op(
+                path + (j1 + offset,), dst[j1 + offset]))
+        return plan
 
 
 def _positional_cost(old, new):

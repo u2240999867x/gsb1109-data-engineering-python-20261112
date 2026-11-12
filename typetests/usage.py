@@ -62,6 +62,18 @@ assert_type(JsonPatch.from_string('[]'), JsonPatch)
 assert_type(JsonPatch.from_string(b'[]', loads=json.loads), JsonPatch)
 assert_type(JsonPatch.from_string(bytearray(b'[]')), JsonPatch)
 assert_type(JsonPatch.from_diff(doc, {}, optimization=False), JsonPatch)
+byte_patch = JsonPatch.from_diff(
+    doc, {}, cost='bytes', restricted=['/foo'], array_window=4)
+assert_type(byte_patch, JsonPatch)
+assert_type(jsonpatch.patch_wire_size(byte_patch), int)
+assert_type(jsonpatch.patch_wire_sizes(byte_patch), list[int])
+try:
+    JsonPatch.from_diff(doc, {}, cost='bytes', restricted=['/foo'])
+except jsonpatch.RestrictedValueError:
+    pass
+JsonPatch.from_diff(doc, {}, cost=1)  # type: ignore[arg-type]
+JsonPatch.from_diff(doc, {}, restricted=5)  # type: ignore[arg-type]
+JsonPatch.from_diff(doc, {}, array_window='wide')  # type: ignore[arg-type]
 assert_type(JsonPatch.operations['add'], type[PatchOperation])
 assert_type(JsonPatch.operations, MappingProxyType[str, type[PatchOperation]])
 
