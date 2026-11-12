@@ -119,6 +119,15 @@ class ns(enum.IntEnum):  # noqa: N801
         without `PRESORT` the order of these two values would depend on
         the order they appeared in the input (because Python's `sorted`
         is a stable sorting algorithm).
+    PRECISE, PR
+        Tell `natsort` to compare decimal numbers by their exact value
+        instead of converting them to machine floats. Numbers that are
+        numerically equal but written differently (e.g. "2e10000" and
+        "20e9999") are treated as equal, numbers too large or too
+        precise for a float are ordered correctly, and the exponent may
+        contain an arbitrary number of digits. This implies `FLOAT`;
+        combine with `SIGNED` (or use ``ns.REAL | ns.PRECISE``) to also
+        order negative numbers by value.
 
     Notes
     -----
@@ -149,6 +158,7 @@ class ns(enum.IntEnum):  # noqa: N801
     COMPATIBILITYNORMALIZE = CN = 1 << next(_counter)
     NUMAFTER = NA = 1 << next(_counter)
     PRESORT = PS = 1 << next(_counter)
+    PRECISE = PR = 1 << next(_counter)
 
     # Following were previously options but are now defaults.
     DEFAULT = 0

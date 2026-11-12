@@ -65,6 +65,7 @@ from natsort.compat.locale import (
     get_thousands_sep,
 )
 from natsort.ns_enum import NS_DUMB, NSType, ns
+from natsort.precise_decimal import PreciseDecimal, try_precise_float
 from natsort.unicode_numbers import digits_no_decimals, numeric_no_decimals
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ NumTransform = AnyTuple
 NumTransformer = Callable[[Any], NumTransform]
 
 # For the string component transform factory
-StrBytesNum = Union[str, bytes, float, int]
+StrBytesNum = Union[str, bytes, float, int, PreciseDecimal]
 StrTransformer = Callable[[Iterable[str]], Iterator[StrBytesNum]]
 
 # For the final data transform factory
@@ -197,6 +198,9 @@ def regex_chooser(alg: NSType) -> Pattern[str]:
         Regular expression object that matches the desired number type.
 
     """
+    # PRECISE implies FLOAT - numbers must be parsed as decimals.
+    if alg & ns.PRECISE:
+        alg |= ns.FLOAT
     if alg & ns.FLOAT:
         alg &= ns.FLOAT | ns.SIGNED | ns.NOEXP
     else:
@@ -569,7 +573,7 @@ def sep_inserter(iterator: Iterator[Any], sep: StrOrBytes) -> Iterator[Any]:
         # Get the first element. A StopIteration indicates an empty iterator.
         # Since we are controlling the types of the input, 'type' is used
         # instead of 'isinstance' for the small speed advantage it offers.
-        types = (int, float)
+        types = (int, float, PreciseDecimal)
         first = next(iterator)
         if type(first) in types:
             yield sep
@@ -637,7 +641,7 @@ def input_string_transform_factory(alg: NSType) -> StrToStr:
             )
         """
         nodecimal = r""
-        if alg & ns.FLOAT:
+        if alg & (ns.FLOAT | ns.PRECISE):
             # Make a regular expression component that will ensure no
             # separators are removed after a decimal point.
             d = re.escape(get_decimal_point())
@@ -656,7 +660,7 @@ def input_string_transform_factory(alg: NSType) -> StrToStr:
         # Create a regular expression that will change the decimal point to
         # a period if not already a period.
         decimal = get_decimal_point()
-        if alg & ns.FLOAT and decimal != ".":
+        if alg & (ns.FLOAT | ns.PRECISE) and decimal != ".":
             switch_decimal = r"(?<=[0-9]){decimal}|{decimal}(?=[0-9])"
             switch_decimal = switch_decimal.format(decimal=re.escape(decimal))
             switch_decimal_re = re.compile(switch_decimal)
@@ -700,8 +704,14 @@ def string_component_transform_factory(alg: NSType) -> StrTransformer:
         func_chain.append(get_strxfrm())
 
     # Return the correct chained functions.
+    on_fail = chain_functions(func_chain) if func_chain else _no_op
+    if alg & ns.PRECISE:
+        return cast(
+            "StrTransformer",
+            partial(try_precise_float, map=True, nan=nan_val, on_fail=on_fail),
+        )
     kwargs: dict[str, float | Callable[[str], StrOrBytes] | bool]
-    kwargs = {"on_fail": chain_functions(func_chain)} if func_chain else {}
+    kwargs = {"on_fail": on_fail} if func_chain else {}
     kwargs["map"] = True
     if alg & ns.FLOAT:
         kwargs["nan"] = nan_val

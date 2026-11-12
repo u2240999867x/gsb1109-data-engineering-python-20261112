@@ -8,6 +8,10 @@ Unreleased
   [#179](https://github.com/SethMMorton/natsort/issues/179) and
   [#180](https://github.com/SethMMorton/natsort/issues/180))
 - Add explicit support for Python 3.12 and 3.13
+- Add `ns.PRECISE` option to compare decimal numbers by exact value
+  instead of converting to `float`, so numerically equal values such as
+  `2e10000` and `20e9999` sort as equal, numbers beyond `float` range or
+  precision order correctly, and exponents may have arbitrarily many digits
 
 ### Changed
 
