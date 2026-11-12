@@ -1,8 +1,9 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
 from jsonmerge.exceptions import HeadInstanceError, \
                                  BaseInstanceError, \
+                                 AmbiguousIdError, \
                                  SchemaError
-from jsonmerge.jsonvalue import JSONValue
+from jsonmerge.jsonvalue import JSONValue, json_equal
 import jsonschema
 import re
 
@@ -118,7 +119,7 @@ class Version(Strategy):
             else:
                 last_entry = JSONValue(undef=True)
 
-        if not ignoreDups or last_entry.is_undef() or last_entry['value'].val != head.val:
+        if not ignoreDups or last_entry.is_undef() or not json_equal(last_entry['value'].val, head.val):
             base.val.append(self.add_metadata(head.val, metadata))
             if limit is not None:
                 base.val = base.val[-limit:]
@@ -224,23 +225,27 @@ class ArrayMergeById(ArrayStrategy):
         if walk.is_type(subschema, "array"):
             raise SchemaError("This strategy is not supported when 'items' is an array", subschema)
 
+        # Duplicate ids within head are an error in the head document itself:
+        # there is no way to tell which of the two updates is authoritative.
+        # This is distinct from an ambiguous id encountered in base, which can
+        # be inherited from documents written by older versions of jsonmerge.
         for i, key_1, item_1 in self.iter_index_key_item(walk, head, idRef):
             for j, key_2, item_2 in self.iter_index_key_item(walk, head, idRef):
                 if j < i:
-                    if key_1 == key_2:
+                    if json_equal(key_1, key_2):
                         raise HeadInstanceError("Id '%s' was not unique in head" % (key_1,), item_1)
                 else:
                     break
 
         for i, head_key, head_item in self.iter_index_key_item(walk, head, idRef):
 
-            if head_key == ignoreId:
+            if json_equal(head_key, ignoreId):
                 continue
 
             matching_j = []
             for j, base_key, base_item in self.iter_index_key_item(walk, base, idRef):
 
-                if base_key == head_key:
+                if json_equal(base_key, head_key):
                     matching_j.append(j)
                     matched_item = base_item
 
@@ -252,8 +257,19 @@ class ArrayMergeById(ArrayStrategy):
                 # If there wasn't a match, we append a new object
                 base.append(walk.descend(subschema, JSONValue(undef=True), head_item))
             else:
-                j = matching_j[1]
-                raise BaseInstanceError("Id '%s' was not unique in base" % (base_key,), base[j])
+                # More than one base entry carries an id equal to this head
+                # entry. Such a base can only originate from older versions of
+                # jsonmerge, which conflated values of different JSON types
+                # (e.g. the boolean True and the number 1). The update cannot
+                # be applied without guessing which base entry is the target,
+                # so only this head entry is rejected. The references of every
+                # conflicting base entry are reported so the ambiguity can be
+                # resolved in the base. Other head entries are still replayed.
+                base_refs = [base[j].ref for j in matching_j]
+                raise AmbiguousIdError(
+                        "Id '%s' was not unique in base, conflicting base entries: %s"
+                        % (head_key, ", ".join(base_refs)),
+                        head_item, base_refs=base_refs)
 
         self.sort_array(walk, base, sortByRef, sortReverse)
 

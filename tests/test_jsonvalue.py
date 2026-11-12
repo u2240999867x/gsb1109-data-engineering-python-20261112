@@ -1,6 +1,57 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
 import unittest
-from jsonmerge.jsonvalue import JSONValue
+from jsonmerge.jsonvalue import JSONValue, json_equal
+
+class TestJSONEqual(unittest.TestCase):
+
+    def test_scalars(self):
+        self.assertTrue(json_equal(1, 1))
+        self.assertTrue(json_equal(1, 1.0))
+        self.assertTrue(json_equal("a", "a"))
+        self.assertTrue(json_equal(None, None))
+        self.assertTrue(json_equal(True, True))
+        self.assertTrue(json_equal(False, False))
+
+    def test_bool_not_equal_to_number(self):
+        self.assertFalse(json_equal(True, 1))
+        self.assertFalse(json_equal(False, 0))
+        self.assertFalse(json_equal(1, True))
+        self.assertFalse(json_equal(0, False))
+
+    def test_none_not_equal_to_other_falsy_values(self):
+        self.assertFalse(json_equal(None, False))
+        self.assertFalse(json_equal(None, 0))
+        self.assertFalse(json_equal(None, ""))
+
+    def test_different_types(self):
+        self.assertFalse(json_equal(1, "1"))
+        self.assertFalse(json_equal("a", True))
+        self.assertFalse(json_equal([], {}))
+
+    def test_object_key_order_insignificant(self):
+        self.assertTrue(json_equal({'a': 1, 'b': 2}, {'b': 2, 'a': 1}))
+        self.assertTrue(json_equal(
+            {'a': {'x': True}, 'b': [1, 2]},
+            {'b': [1, 2], 'a': {'x': True}}))
+
+    def test_object_different_keys(self):
+        self.assertFalse(json_equal({'a': 1}, {'a': 1, 'b': 2}))
+        self.assertFalse(json_equal({'a': 1}, {'b': 1}))
+
+    def test_nested_bool_number_distinction(self):
+        self.assertFalse(json_equal({'id': True}, {'id': 1}))
+        self.assertTrue(json_equal({'id': True}, {'id': True}))
+
+    def test_array_order_significant(self):
+        self.assertTrue(json_equal([1, 2], [1, 2]))
+        self.assertFalse(json_equal([1, 2], [2, 1]))
+        self.assertFalse(json_equal([1], [1, 1]))
+        self.assertTrue(json_equal([{'a': 1}, [True]], [{'a': 1}, [True]]))
+        self.assertFalse(json_equal([{'a': 1}], [{'a': True}]))
+
+    def test_nan(self):
+        self.assertTrue(json_equal(float('nan'), float('nan')))
+        self.assertFalse(json_equal(float('nan'), 1))
 
 class TestJSONValue(unittest.TestCase):
 

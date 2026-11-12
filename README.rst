@@ -262,6 +262,19 @@ arrayMergeById
   and if *ignoreId* option is also defined, *ignoreId* must be an array as
   well.
 
+  IDs are compared by their JSON value rather than by Python equality. In
+  particular the boolean *true* is not the same ID as the number *1*, and
+  two objects are considered the same key regardless of the order of their
+  properties, while the order of elements in an array ID is significant.
+
+  If an ID occurs more than once within *head*, a *HeadInstanceError* is
+  raised. If an ID from *head* matches more than one item already present
+  in *base*, an *AmbiguousIdError* (a subclass of *BaseInstanceError*) is
+  raised for that head item only. The error reports the JSON references of
+  every conflicting item in *base*, so the ambiguity can be resolved in the
+  base; removing the isolated head item and replaying leaves all other
+  updates unaffected.
+
   You can specify a *sortByRef* merge option to indicate the key that will
   be used to sort the items in the array. This option can be an arbitrary
   *JSON pointer*. The pointer is resolved in the same way as *idRef*. Sort
@@ -305,7 +318,9 @@ version
 
   By default, if a *head* document contains the same value as the *base*,
   document, no new version will be appended. You can change this by setting
-  *ignoreDups* option to *false*.
+  *ignoreDups* option to *false*. Values are compared by their JSON value:
+  *true* and *1* count as different values, object property order is
+  ignored, but array element order is significant.
 
 If a merge strategy is not specified in the schema, *objectMerge* is used
 for objects and *overwrite* for all other values (but see also the section

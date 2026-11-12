@@ -1,3 +1,13 @@
+2026-11-12	jsonmerge	1.9.3
+	* Compare IDs in arrayMergeById and values in the version strategy by
+	  JSON equality instead of Python equality: booleans are no longer
+	  conflated with numbers, object property order is ignored and array
+	  element order is significant.
+	* Distinguish duplicate IDs in head (HeadInstanceError) from ambiguous
+	  IDs already present in base, which now raise AmbiguousIdError. Only
+	  the head entry matching multiple base entries is rejected and the
+	  error reports the JSON references of all conflicting base entries.
+
 2023-07-19	jsonmerge	1.9.2
 	* Fix failing tests with jsonschema>=4.18.0.
 

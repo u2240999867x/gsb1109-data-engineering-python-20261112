@@ -1,10 +1,53 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
+import math
+import numbers
 import sys
 
 if sys.version_info[0] >= 3:
     text_type = str
 else:
     text_type = unicode
+
+def json_equal(a, b):
+    """Compare two values according to JSON equality rules.
+
+    Unlike Python's '==' operator, this function distinguishes between
+    values of different JSON types (e.g. the boolean True and the number
+    1, or None and False) and compares object keys independently of
+    their order. The order of array elements is significant.
+    """
+
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+
+    if a is None or b is None:
+        return a is None and b is None
+
+    if isinstance(a, dict) and isinstance(b, dict):
+        if len(a) != len(b):
+            return False
+
+        for key, value in a.items():
+            if key not in b:
+                return False
+            if not json_equal(value, b[key]):
+                return False
+
+        return True
+
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return False
+
+        return all(json_equal(x, y) for x, y in zip(a, b))
+
+    if isinstance(a, numbers.Number) and isinstance(b, numbers.Number):
+        if isinstance(a, float) and math.isnan(a):
+            return isinstance(b, float) and math.isnan(b)
+
+        return a == b
+
+    return type(a) == type(b) and a == b
 
 class JSONValue(object):
     def __init__(self, val=None, ref='#', undef=False):

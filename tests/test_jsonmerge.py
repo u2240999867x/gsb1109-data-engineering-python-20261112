@@ -9,6 +9,7 @@ import jsonmerge.strategies
 from jsonmerge.exceptions import (
     HeadInstanceError,
     BaseInstanceError,
+    AmbiguousIdError,
     SchemaError
 )
 from jsonmerge.jsonvalue import JSONValue
@@ -1236,10 +1237,14 @@ class TestMerge(unittest.TestCase):
 
         merger = jsonmerge.Merger(schema)
 
-        with self.assertRaises(BaseInstanceError) as cm:
+        # AmbiguousIdError is a subclass of BaseInstanceError
+        with self.assertRaises(AmbiguousIdError) as cm:
             merger.merge(base, head)
 
-        self.assertEqual(cm.exception.value.ref, '#/1')
+        # The error points at the head entry that cannot be applied ...
+        self.assertEqual(cm.exception.value.ref, '#/0')
+        # ... and at every conflicting entry already present in the base.
+        self.assertEqual(cm.exception.base_refs, ['#/0', '#/1'])
 
     def test_merge_by_id_non_unique_head(self):
         schema = {
@@ -1264,6 +1269,286 @@ class TestMerge(unittest.TestCase):
             merger.merge(base, head)
 
         self.assertEqual(cm.exception.value.ref, '#/1')
+
+    def test_merge_by_id_bool_and_number_are_distinct(self):
+        # True and 1 compare equal with Python's '==', but they are
+        # different JSON values and must not be treated as the same id.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+            "mergeOptions": {"idRef": "/"},
+        }
+
+        merger = jsonmerge.Merger(schema)
+
+        base = merger.merge(None, [True, 1])
+        self.assertEqual(base, [True, 1])
+
+        base = merger.merge(base, [1])
+        self.assertEqual(base, [True, 1])
+
+        base = merger.merge(base, [False])
+        self.assertEqual(base, [True, 1, False])
+
+    def test_merge_by_id_bool_and_number_update_separate_rows(self):
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': True, 'field': 'a'},
+            {'id': 1, 'field': 'b'},
+        ]
+
+        head = [
+            {'id': 1, 'field': 'B'},
+            {'id': True, 'field': 'A'},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+        result = merger.merge(base, head)
+
+        self.assertEqual(result, [
+            {'id': True, 'field': 'A'},
+            {'id': 1, 'field': 'B'},
+        ])
+
+    def test_merge_by_id_legacy_ambiguous_base_isolates_only_ambiguous_update(self):
+        # A base can contain two rows whose ids are equal according to the
+        # JSON equality rules (e.g. a baseline produced outside jsonmerge or
+        # inherited from older data). Only the head entry that actually
+        # matches both rows is ambiguous; entries uniquely matching a single
+        # row must still be replayed.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': 1, 'field': 'a'},
+            {'id': 1, 'field': 'b'},
+            {'id': 'c', 'field': 'c'},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+
+        # The unambiguous update for id 'c' is applied before the ambiguous
+        # entry raises, proving non-ambiguous rows keep their updates.
+        head_partial = [
+            {'id': 'c', 'field': 'C'},
+            {'id': 1, 'field': 'B'},
+        ]
+
+        with self.assertRaises(AmbiguousIdError) as cm:
+            merger.merge(base, head_partial)
+
+        self.assertEqual(cm.exception.value.ref, '#/1')
+        self.assertEqual(cm.exception.base_refs, ['#/0', '#/1'])
+
+        # Remove the isolated row and replay: the remaining update is
+        # applied and the base rows themselves are left untouched.
+        head_clean = [
+            {'id': 'c', 'field': 'C'},
+        ]
+
+        result = merger.merge(base, head_clean)
+        self.assertEqual(result, [
+            {'id': 1, 'field': 'a'},
+            {'id': 1, 'field': 'b'},
+            {'id': 'c', 'field': 'C'},
+        ])
+
+    def test_merge_by_id_legacy_ambiguous_composite_id_reports_old_rows(self):
+        # The same ambiguity can occur with composite ids that are JSON-equal
+        # even though they were written down separately.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': {'k': [1, 2]}, 'field': 'a'},
+            {'id': {'k': [1, 2]}, 'field': 'b'},
+        ]
+
+        head = [
+            {'id': {'k': [1, 2]}, 'field': 'c'},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+
+        with self.assertRaises(AmbiguousIdError) as cm:
+            merger.merge(base, head)
+
+        self.assertEqual(cm.exception.base_refs, ['#/0', '#/1'])
+        self.assertEqual(cm.exception.value.ref, '#/0')
+
+    def test_merge_by_id_bool_number_rows_each_get_their_own_update(self):
+        # With a legacy-style base containing both a boolean and a numeric id,
+        # the new equality rules can tell them apart, so each row receives its
+        # own update instead of raising an ambiguity error.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': True, 'field': 'a'},
+            {'id': 1, 'field': 'b'},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+
+        result = merger.merge(base, [
+            {'id': 1, 'field': 'B'},
+            {'id': True, 'field': 'A'},
+        ])
+
+        self.assertEqual(result, [
+            {'id': True, 'field': 'A'},
+            {'id': 1, 'field': 'B'},
+        ])
+
+        # A genuinely duplicated numeric id remains ambiguous.
+        base_dup = [
+            {'id': 1, 'field': 'a'},
+            {'id': 1, 'field': 'b'},
+        ]
+
+        with self.assertRaises(AmbiguousIdError) as cm:
+            merger.merge(base_dup, [{'id': 1, 'field': 'c'}])
+
+        self.assertEqual(cm.exception.base_refs, ['#/0', '#/1'])
+
+    def test_merge_by_id_complex_id_object_key_order_insignificant(self):
+        # Two objects with the same properties in a different order are the
+        # same JSON key.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': {'a': 1, 'b': 2}, 'field': 1},
+        ]
+
+        head = [
+            {'id': {'b': 2, 'a': 1}, 'field': 2},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+        result = merger.merge(base, head)
+
+        self.assertEqual(result, [
+            {'id': {'a': 1, 'b': 2}, 'field': 2},
+        ])
+
+    def test_merge_by_id_complex_id_array_order_significant(self):
+        # Array element order is significant, so a different order means a
+        # different key and a new row is appended.
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        base = [
+            {'id': [1, 2], 'field': 1},
+        ]
+
+        head = [
+            {'id': [2, 1], 'field': 2},
+        ]
+
+        merger = jsonmerge.Merger(schema)
+        result = merger.merge(base, head)
+
+        self.assertEqual(result, [
+            {'id': [1, 2], 'field': 1},
+            {'id': [2, 1], 'field': 2},
+        ])
+
+    def test_merge_by_id_head_duplicate_bool_number_is_not_duplicate(self):
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+            "mergeOptions": {"idRef": "/"},
+        }
+
+        merger = jsonmerge.Merger(schema)
+
+        # True and 1 are distinct ids, so no duplicate-id error is raised.
+        result = merger.merge(None, [True, 1])
+        self.assertEqual(result, [True, 1])
+
+        # Two booleans with the same value are still a genuine duplicate.
+        with self.assertRaises(HeadInstanceError) as cm:
+            merger.merge(None, [True, True])
+
+        self.assertEqual(cm.exception.value.ref, '#/1')
+
+    def test_merge_by_id_head_duplicate_and_base_ambiguity_are_distinct(self):
+        schema = {
+            "mergeStrategy": "arrayMergeById",
+        }
+
+        merger = jsonmerge.Merger(schema)
+
+        # Duplicate ids inside the head document are a head error, even when
+        # no such id exists in the base.
+        with self.assertRaises(HeadInstanceError):
+            merger.merge(None, [
+                {'id': 'a', 'field': 1},
+                {'id': 'a', 'field': 2},
+            ])
+
+        # An id that occurs more than once in the base is a base ambiguity
+        # error instead, and it is raised only for the head entry that
+        # actually matches it.
+        base = [
+            {'id': 'a', 'field': 1},
+            {'id': 'a', 'field': 2},
+        ]
+
+        with self.assertRaises(AmbiguousIdError):
+            merger.merge(base, [
+                {'id': 'b', 'field': 3},
+                {'id': 'a', 'field': 4},
+            ])
+
+    def test_version_distinguishes_bool_and_number(self):
+        schema = {'mergeStrategy': 'version'}
+
+        merger = jsonmerge.Merger(schema)
+
+        base = None
+        base = merger.merge(base, True)
+        base = merger.merge(base, 1)
+        base = merger.merge(base, 1.0)
+        base = merger.merge(base, True)
+
+        self.assertEqual(base, [
+            {'value': True},
+            {'value': 1},
+            {'value': True},
+        ])
+
+    def test_version_object_key_order_is_deduped(self):
+        schema = {'mergeStrategy': 'version'}
+
+        merger = jsonmerge.Merger(schema)
+
+        base = None
+        base = merger.merge(base, {'a': 1, 'b': 2})
+        base = merger.merge(base, {'b': 2, 'a': 1})
+
+        self.assertEqual(base, [{'value': {'a': 1, 'b': 2}}])
+
+    def test_version_array_order_is_significant(self):
+        schema = {'mergeStrategy': 'version'}
+
+        merger = jsonmerge.Merger(schema)
+
+        base = None
+        base = merger.merge(base, [1, 2])
+        base = merger.merge(base, [2, 1])
+
+        self.assertEqual(base, [
+            {'value': [1, 2]},
+            {'value': [2, 1]},
+        ])
 
     def test_merge_by_id_order_issue_31_1(self):
 
