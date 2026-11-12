@@ -114,3 +114,11 @@ pathspec.util
 .. automodule:: pathspec.util
 	:members:
 	:show-inheritance:
+
+
+pathspec.migrate
+----------------
+
+.. automodule:: pathspec.migrate
+	:members:
+	:show-inheritance:
