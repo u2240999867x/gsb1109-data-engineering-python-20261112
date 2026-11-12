@@ -106,7 +106,19 @@ class OneOf(Descender):
             raise HeadInstanceError("Multiple elements of 'oneOf' validate", head)
 
         i = valid[0]
-        return walk.descend(one_of[i], base, head)
+        chosen = one_of[i]
+        result = walk.descend(chosen, base, head)
+
+        # Record which branch was selected so the choice can be explained
+        # along the source path. An existing origin (e.g. an absent value)
+        # is preserved; the oneOf decision is added on top of it.
+        meta = dict(result.meta) if result.meta is not None else {}
+        meta.setdefault('origin', 'oneOf')
+        meta.update({'branch': i,
+                     'schema_ref': chosen.ref,
+                     'ref': result.ref})
+        return JSONValue(result.val, result.ref, undef=result.is_undef(),
+                         meta=meta)
 
     def descend_schema(self, walk, schema):
         if not self.do_descend(schema):

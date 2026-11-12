@@ -95,8 +95,12 @@ class Version(Strategy):
             if not walk.is_type(JSONValue(val=metadata), "object"):
                 raise SchemaError("'metadata' option does not contain an object")
 
-        if base.is_undef():
-            base = JSONValue(val=[], ref=base.ref)
+        if base.is_undef() or base.is_null():
+            # An explicitly stored null carries no previous versions, just
+            # like a record that never existed. The distinction is still
+            # available via base.is_null()/base.source() for custom
+            # strategies and is carried forward as provenance here.
+            base = JSONValue(val=[], ref=base.ref, meta=base.meta)
             last_entry = JSONValue(undef=True)
         else:
             if not walk.is_type(base, "array"):
@@ -152,8 +156,9 @@ class ArrayStrategy(Strategy):
         if not walk.is_type(head, "array"):
             raise HeadInstanceError("Head is not an array", head)
 
-        if base.is_undef():
-            base = JSONValue([], base.ref)
+        if base.is_undef() or base.is_null():
+            # A stored null has no elements, just like an absent array.
+            base = JSONValue([], base.ref, meta=base.meta)
         else:
             if not walk.is_type(base, "array"):
                 raise BaseInstanceError("Base is not an array", base)
@@ -311,8 +316,11 @@ class ObjectMerge(Strategy):
         if objcls is None:
             raise SchemaError("objClass '%s' not recognized" % objClass, schema)
 
-        if base.is_undef():
-            base = JSONValue(objcls(), base.ref)
+        if base.is_undef() or base.is_null():
+            # A present null has no object properties, so merging behaves the
+            # same as an empty/absent object. The explicit-null origin is
+            # retained as provenance rather than conflated with "absent".
+            base = JSONValue(objcls(), base.ref, meta=base.meta)
         else:
             if not walk.is_type(base, "object"):
                 raise BaseInstanceError("Base is not an object", base)

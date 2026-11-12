@@ -1,3 +1,13 @@
+2026-11-12	jsonmerge	1.10.0 (unreleased)
+	* Distinguish a record that never existed from one whose stored value
+	  is an explicit JSON null. Add the jsonmerge.UNDEFINED sentinel and
+	  JSONValue.present_null(); base=None keeps its previous "no record"
+	  meaning. JSONValue.get() no longer conflates a stored null with a
+	  missing key, and JSONValue exposes is_null() and source() provenance
+	  that reaches nested objects, oneOf branch selection and custom
+	  strategies. Merge output stays valid JSON and backwards compatible,
+	  and get_schema() contracts validate results from all three sources.
+
 2023-07-19	jsonmerge	1.9.2
 	* Fix failing tests with jsonschema>=4.18.0.
 

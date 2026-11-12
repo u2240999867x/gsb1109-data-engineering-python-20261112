@@ -391,6 +391,64 @@ that defines what to do in such cases. See docstring documentation for the
 *Strategy* class on how to do that.
 
 
+Missing records versus explicit JSON null
+------------------------------------------
+
+Two situations used to be indistinguishable: a record (or a property) that
+never existed and one whose stored value is an explicit JSON ``null``. Both
+were passed to merge strategies as an undefined value.
+
+You can now state which of the three sources a value comes from:
+
+- ``base=None`` (the old calling convention) means there was no previous
+  record. This is kept for backwards compatibility and is equivalent to the
+  explicit sentinel below.
+- ``jsonmerge.UNDEFINED`` explicitly marks a whole record that never existed.
+- ``jsonmerge.JSONValue.present_null()`` marks a record whose stored value is
+  an explicit JSON ``null``. A ``null`` nested inside an object is likewise a
+  present value rather than a missing property.
+
+Inside a merge strategy, an undefined value is reported by
+``JSONValue.is_undef()``, while an explicit null is a present value for which
+``JSONValue.is_null()`` returns true. ``JSONValue.source()`` returns a
+dictionary describing the provenance of an absent value (or ``None`` for
+present values), including the JSON-pointer ``ref`` and, for *oneOf*, the
+selected ``branch``::
+
+    >>> import jsonmerge
+    >>> from jsonmerge import Merger, UNDEFINED, JSONValue
+    >>> class Probe(jsonmerge.strategies.Strategy):
+    ...     def merge(self, walk, base, head, schema, **kwargs):
+    ...         return JSONValue({
+    ...             'undefined': base.is_undef(),
+    ...             'null': base.is_null(),
+    ...         })
+    >>> merger = Merger({'mergeStrategy': 'probe'},
+    ...                 strategies={'probe': Probe()})
+    >>> merger.merge(UNDEFINED, 1)
+    {'undefined': True, 'null': False}
+    >>> merger.merge(None, 1)
+    {'undefined': True, 'null': False}
+    >>> merger.merge(JSONValue.present_null(), 1)
+    {'undefined': False, 'null': True}
+
+The same distinction propagates through nested objects, so a missing
+sub-column and an explicitly null sub-column can be told apart::
+
+    >>> merger = Merger(
+    ...     {'properties': {'k': {'mergeStrategy': 'probe'}}},
+    ...     strategies={'probe': Probe()})
+    >>> merger.merge({}, {'k': 1})
+    {'k': {'undefined': True, 'null': False}}
+    >>> merger.merge({'k': None}, {'k': 1})
+    {'k': {'undefined': False, 'null': True}}
+
+Note that the serialized merge output stays valid JSON and backwards
+compatible: the provenance is only attached to the in-memory *JSONValue*
+objects. The schema returned by *get_schema()* validates the results produced
+from all three sources.
+
+
 Security considerations
 -----------------------
 

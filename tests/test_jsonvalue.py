@@ -38,6 +38,40 @@ class TestJSONValue(unittest.TestCase):
         va = v.get('a')
         self.assertTrue(va.is_undef())
 
+    def test_get_missing_records_source(self):
+        v = JSONValue({})
+
+        va = v.get('a')
+        self.assertTrue(va.is_undef())
+        self.assertEqual(va.source(),
+                         {'origin': 'missing', 'key': 'a', 'ref': '#/a'})
+
+    def test_get_explicit_null_is_present(self):
+        # An explicit JSON null must not be confused with a missing key.
+        v = JSONValue({'a': None})
+
+        va = v.get('a')
+        self.assertFalse(va.is_undef())
+        self.assertTrue(va.is_null())
+        self.assertIsNone(va.val)
+        self.assertEqual('#/a', va.ref)
+        self.assertIsNone(va.source())
+
+    def test_get_default_value(self):
+        v = JSONValue({})
+
+        va = v.get('a', 'default')
+        self.assertFalse(va.is_undef())
+        self.assertEqual('default', va.val)
+
+    def test_present_null(self):
+        v = JSONValue.present_null('#/x')
+
+        self.assertFalse(v.is_undef())
+        self.assertTrue(v.is_null())
+        self.assertIsNone(v.val)
+        self.assertEqual('#/x', v.ref)
+
     def test_get(self):
         v = JSONValue({'a': 'b'})
 

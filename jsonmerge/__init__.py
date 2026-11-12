@@ -1,6 +1,6 @@
 # vim:ts=4 sw=4 expandtab softtabstop=4
 from collections import OrderedDict
-from jsonmerge.jsonvalue import JSONValue
+from jsonmerge.jsonvalue import JSONValue, UNDEFINED
 from jsonmerge.resolver import LocalRefResolver
 from jsonmerge import strategies
 from jsonmerge import descenders
@@ -44,6 +44,13 @@ class Walk(object):
     def descend(self, schema, *args):
         assert isinstance(schema, JSONValue)
         self.lvl += 1
+
+        # A JSON schema of 'null' is a valid (permissive) subschema, but it
+        # carries no merge directives. Treat it like an absent schema so the
+        # default strategy is used. This only concerns schema values; data
+        # values are passed separately in *args.
+        if not schema.is_undef() and schema.val is None:
+            schema = JSONValue(undef=True, ref=schema.ref)
 
         log.debug("descend: %sschema %s" % (self._indent(), schema.ref,))
 
@@ -320,11 +327,28 @@ class Merger(object):
         schema = JSONValue(self.schema)
 
         if base is None:
-            base = JSONValue(undef=True)
+            # Backwards-compatible behavior: a Python None base means there
+            # was no previous document. jsonmerge.UNDEFINED states the same
+            # thing explicitly, while JSONValue.present_null() marks a record
+            # whose stored value is an explicit JSON null.
+            base = JSONValue(undef=True,
+                             meta={'origin': 'none', 'ref': '#'})
+        elif base is UNDEFINED:
+            base = JSONValue(undef=True,
+                             meta={'origin': 'undefined', 'ref': '#'})
+        elif isinstance(base, JSONValue):
+            # A fully constructed value (e.g. an explicit null) is accepted
+            # as-is. Backfill provenance for undefined values.
+            if base.is_undef() and base.meta is None:
+                base = JSONValue(undef=True, ref=base.ref,
+                                 meta={'origin': 'undefined', 'ref': base.ref})
         else:
             base = JSONValue(base)
 
-        head = JSONValue(head)
+        if head is None:
+            head = JSONValue.present_null()
+        else:
+            head = JSONValue(head)
 
         if merge_options is None:
             merge_options = {}

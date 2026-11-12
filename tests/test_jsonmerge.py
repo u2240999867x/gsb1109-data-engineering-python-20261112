@@ -2644,6 +2644,166 @@ class TestGetSchema(unittest.TestCase):
 
         self.assertIn('arrayMergeByIndex', str(cm.exception))
 
+class TestNullVsUndefined(unittest.TestCase):
+    """Distinguishing a missing record from an explicit JSON null.
+
+    Three sources must remain separable all the way down:
+      * jsonmerge.UNDEFINED / base=None : no previous record,
+      * JSONValue.present_null()        : an explicitly stored null,
+      * a null stored in a sub-column   : a present null child.
+    """
+
+    def test_undefined_sentinel_matches_legacy_none(self):
+        schema = {"properties": {"a": {"mergeStrategy": "version"}}}
+        head = {"a": 1}
+
+        merger_none = jsonmerge.Merger(schema)
+        merger_undef = jsonmerge.Merger(schema)
+
+        self.assertEqual(
+            merger_none.merge(None, head),
+            merger_undef.merge(jsonmerge.UNDEFINED, head))
+
+    def test_present_null_is_a_present_value(self):
+        v = JSONValue.present_null('#/a')
+        self.assertFalse(v.is_undef())
+        self.assertTrue(v.is_null())
+
+    def test_custom_strategy_sees_three_sources(self):
+        seen = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                seen.append({
+                    'undef': base.is_undef(),
+                    'null': base.is_null(),
+                    'source': base.source(),
+                })
+                return head
+
+        schema = {'mergeStrategy': 'probe'}
+        merger = jsonmerge.Merger(schema, strategies={'probe': Probe()})
+
+        merger.merge(jsonmerge.UNDEFINED, 1)
+        merger.merge(None, 1)
+        merger.merge(JSONValue.present_null(), 1)
+
+        self.assertTrue(seen[0]['undef'])
+        self.assertEqual(seen[0]['source']['origin'], 'undefined')
+
+        # Legacy None behaves like an absent record.
+        self.assertTrue(seen[1]['undef'])
+        self.assertEqual(seen[1]['source']['origin'], 'none')
+
+        # An explicit null is present, not undefined.
+        self.assertFalse(seen[2]['undef'])
+        self.assertTrue(seen[2]['null'])
+        self.assertIsNone(seen[2]['source'])
+
+    def test_missing_vs_null_subcolumn(self):
+        seen = []
+
+        class Probe(jsonmerge.strategies.Strategy):
+            def merge(self, walk, base, head, schema, **kwargs):
+                seen.append((base.is_undef(), base.is_null(), base.source()))
+                return head
+
+        schema = {'properties': {'k': {'mergeStrategy': 'probe'}}}
+        merger = jsonmerge.Merger(schema, strategies={'probe': Probe()})
+
+        merger.merge({}, {'k': 1})
+        merger.merge({'k': None}, {'k': 1})
+
+        undef, isnull, source = seen[0]
+        self.assertTrue(undef)
+        self.assertFalse(isnull)
+        self.assertEqual(source,
+                         {'origin': 'missing', 'key': 'k', 'ref': '#/k'})
+
+        undef, isnull, source = seen[1]
+        self.assertFalse(undef)
+        self.assertTrue(isnull)
+        self.assertIsNone(source)
+
+    def test_oneof_records_selected_branch(self):
+        from jsonmerge import WalkInstance
+        from jsonmerge.descenders import OneOf
+
+        schema = {'oneOf': [
+            {'type': 'null'},
+            {'type': 'object'},
+        ]}
+        merger = jsonmerge.Merger(schema)
+
+        null_base = JSONValue.present_null()
+        null_head = JSONValue(None)
+        walk = WalkInstance(merger, null_base, null_head, {})
+        result = OneOf().descend_instance(
+            walk, JSONValue(schema), null_base, null_head)
+        self.assertEqual(result.source()['branch'], 0)
+        self.assertEqual(result.source()['schema_ref'], '#/oneOf/0')
+
+        absent_base = JSONValue(undef=True,
+                                meta={'origin': 'undefined', 'ref': '#'})
+        obj_head = JSONValue({'x': 1})
+        walk = WalkInstance(merger, absent_base, obj_head, {})
+        result = OneOf().descend_instance(
+            walk, JSONValue(schema), absent_base, obj_head)
+        self.assertEqual(result.source()['branch'], 1)
+        self.assertEqual(result.source()['schema_ref'], '#/oneOf/1')
+
+    def test_head_explicit_null_is_recorded(self):
+        schema = {'properties': {'k': {'mergeStrategy': 'version'}}}
+        merger = jsonmerge.Merger(schema)
+
+        result = merger.merge({}, {'k': None})
+        self.assertEqual(result, {'k': [{'value': None}]})
+
+    def test_get_schema_validates_three_sources(self):
+        schema = {'properties': {
+            'a': {'mergeStrategy': 'version', 'type': 'integer'}}}
+        head = {'a': 1}
+
+        outputs = [
+            jsonmerge.Merger(schema).merge(jsonmerge.UNDEFINED, head),
+            jsonmerge.Merger(schema).merge(None, head),
+            jsonmerge.Merger(schema).merge({'a': None}, head),
+            jsonmerge.Merger(schema).merge(
+                {'a': [{'value': 5}]}, head),
+        ]
+
+        contract = jsonmerge.Merger(schema).get_schema()
+
+        for output in outputs:
+            jsonschema.validate(output, contract)
+
+    def test_outputs_are_legal_json(self):
+        import json
+
+        schema = {'properties': {'a': {'mergeStrategy': 'version'}}}
+        merger = jsonmerge.Merger(schema)
+
+        for base in (jsonmerge.UNDEFINED, None, {'a': None}):
+            json.dumps(merger.merge(base, {'a': 1}))
+
+    def test_present_null_top_level_object_merge(self):
+        merger = jsonmerge.Merger({})
+
+        self.assertEqual(
+            merger.merge(JSONValue.present_null(), {'x': 1}),
+            merger.merge(None, {'x': 1}))
+
+    def test_null_subschema_still_merges(self):
+        # A JSON schema 'null' subschema means "any type" and must keep
+        # behaving like an absent schema during merging.
+        schema = {'type': 'object', 'properties': {'a': None}}
+        merger = jsonmerge.Merger(schema)
+
+        self.assertEqual(
+            merger.merge({'a': 1}, {'a': 2}),
+            {'a': 2})
+
+
 class TestExceptions(unittest.TestCase):
     def test_str_with_ref(self):
         e = SchemaError("Test error", JSONValue({}, '#'))
