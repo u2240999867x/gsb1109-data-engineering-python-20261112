@@ -27,6 +27,7 @@ from typing import (
 )
 from uuid import UUID
 
+from faker.coherence import CoherentRow, SourcesSpec
 from faker.generator import Generator
 from faker.providers import T
 from faker.providers.python import TEnum
@@ -4947,5 +4948,32 @@ class Faker:
 
         :param locale: locale string
         :param seed: seed value
+        """
+        ...
+
+    def coherent_row(
+        self,
+        fields: "Sequence[str]",
+        sources: "SourcesSpec" = ...,
+        *,
+        strict: "bool" = ...,
+        fallback: "Callable[[str], Any] | None" = ...,
+    ) -> "CoherentRow":
+        """
+        Generate one row whose fields all come from the same locale source.
+        """
+        ...
+
+    def coherent_rows(
+        self,
+        fields: "Sequence[str]",
+        nb: "int",
+        sources: "SourcesSpec" = ...,
+        *,
+        strict: "bool" = ...,
+        fallback: "Callable[[str], Any] | None" = ...,
+    ) -> "list[CoherentRow]":
+        """
+        Generate ``nb`` independent coherent rows (see :meth:`coherent_row`).
         """
         ...

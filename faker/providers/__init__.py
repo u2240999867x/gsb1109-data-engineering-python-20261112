@@ -24,6 +24,11 @@ class BaseProvider:
     __provider__ = "base"
     __lang__: Optional[str] = None
     __use_weighting__ = False
+    # Locale sources that a provider explicitly declares for coherent,
+    # same-locale row generation. ``None`` means the provider accepts the
+    # locale it was instantiated for (the default); an empty tuple declares
+    # that the provider must not participate in coherent row generation.
+    __locales__: Optional[tuple[str, ...]] = None
 
     # Locales supported by Linux Mint from `/usr/share/i18n/SUPPORTED`
     language_locale_codes = {

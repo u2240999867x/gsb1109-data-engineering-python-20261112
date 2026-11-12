@@ -8,6 +8,7 @@ from collections import OrderedDict
 from random import Random
 from typing import Any, Callable, Pattern, Sequence, TypeVar
 
+from .coherence import CoherenceEngine, CoherentRow, LocaleEntry, SourcesSpec, normalize_layers
 from .config import DEFAULT_LOCALE
 from .exceptions import UniquenessException
 from .factory import Factory
@@ -296,6 +297,57 @@ class Faker:
 
     def items(self) -> list[tuple[str, Generator | Faker]]:
         return list(self._factory_map.items())
+
+    def _coherence_entries(self) -> list[LocaleEntry]:
+        entries = []
+        for index, (locale, factory) in enumerate(self._factory_map.items()):
+            weight = self._weights[index] if self._weights else None
+            entries.append(LocaleEntry(locale=locale, generator=factory, weight=weight))
+        return entries
+
+    def coherent_row(
+        self,
+        fields: Sequence[str],
+        sources: SourcesSpec = None,
+        *,
+        strict: bool = True,
+        fallback: Callable[[str], Any] | None = None,
+    ) -> CoherentRow:
+        """Generate one row whose fields all come from the same locale source.
+
+        :param fields: provider method names forming the row, e.g.
+            ``["name", "street_address", "phone_number"]``.
+        :param sources: allowed source order. Either a single ordered list of
+            layers applied to every field (a layer is a locale code or a group
+            of codes), or a mapping of field name to its own ordered layers.
+            The first layer that can supply the whole row wins; within it, the
+            configured locale weights decide the actual factory.
+        :param strict: when ``True`` (default) a row without a common source
+            raises :class:`~faker.exceptions.LocaleCoherenceException`; when
+            ``False`` and ``fallback`` is given, fields are generated through
+            ``fallback`` instead. Failed resolutions never consume randomness.
+
+        The engine inspects the currently registered providers on every call,
+        so a provider registered at runtime via :meth:`add_provider` benefits
+        the very next row.
+        """
+        normalized = normalize_layers(sources, self._locales)
+        engine = CoherenceEngine(self._coherence_entries())
+        return engine.generate(fields, normalized, strict=strict, fallback=fallback)
+
+    def coherent_rows(
+        self,
+        fields: Sequence[str],
+        nb: int,
+        sources: SourcesSpec = None,
+        *,
+        strict: bool = True,
+        fallback: Callable[[str], Any] | None = None,
+    ) -> list[CoherentRow]:
+        """Generate ``nb`` independent coherent rows (see :meth:`coherent_row`)."""
+        normalized = normalize_layers(sources, self._locales)
+        engine = CoherenceEngine(self._coherence_entries())
+        return [engine.generate(fields, normalized, strict=strict, fallback=fallback) for _ in range(nb)]
 
 
 class UniqueProxy:
