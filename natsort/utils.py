@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Iterator
+from collections.abc import Mapping as MappingABC
 from functools import partial, reduce
 from itertools import chain as ichain
 from operator import methodcaller
@@ -51,6 +52,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    NamedTuple,
     Union,
     cast,
     overload,
@@ -113,6 +115,19 @@ FinalTransformer = Callable[[Iterable[Any], str], FinalTransform]
 
 PathArg = Union[str, PurePath]
 MatchFn = Callable[[str], Union[Match[str], None]]
+
+# For the manifest (root / relative-path / source) path parsing factory
+RootMapping = MappingABC[str, str]
+PathKind = int
+
+
+class ResolvedPath(NamedTuple):
+    """Classification of a manifest path spelling."""
+
+    kind: PathKind
+    anchor: str
+    parts: tuple[str, ...]
+
 
 # For the string parsing factory
 StrSplitter = Callable[[str], Iterable[str]]
@@ -866,6 +881,199 @@ def do_decoding(s: Any, encoding: str) -> Any:
     if isinstance(s, bytes):
         return s.decode(encoding)
     return s
+
+
+#
+# Manifest (root / relative-path / source-system) path handling.
+#
+# Paths recorded in a historical collection manifest are only interpreted
+# from their literal spelling - nothing on the host filesystem is ever
+# consulted.  Windows UNC shares, drive-letter paths, POSIX roots, paths that
+# merely contain a literal backslash, and paths bound to an explicit base are
+# all kept distinct.
+#
+
+# Sort zones.  A relative path may only enter an absolute zone when it is
+# explicitly bound to a declared base; every other relative spelling keeps
+# its own zone so it can never collide with an absolute path.
+PATH_KIND_UNC = 0
+PATH_KIND_DRIVE = 1
+PATH_KIND_DRIVE_RELATIVE = 2
+PATH_KIND_POSIX = 3
+PATH_KIND_LITERAL_BACKSLASH = 4
+PATH_KIND_RELATIVE = 5
+
+# Regexes operate on the raw string so UNC roots and drive letters are
+# recognised on every host operating system, not only on Windows.
+_UNC_RE = re.compile(r"^\\\\(?!\\)([^\\/:*?\"<>|]+)(?:\\([^\\/:*?\"<>|]+))?")
+_DRIVE_ABS_RE = re.compile(r"^([A-Za-z]:)[\\/]")
+_DRIVE_REL_RE = re.compile(r"^([A-Za-z]:)(?![\\/])")
+_POSIX_ROOT_RE = re.compile(r"^/")
+_BACKSLASH = "\\"
+_SLASH = "/"
+
+
+def _split_manifest_components(kind: PathKind, remainder: str) -> tuple[str, ...]:
+    """Split the remainder of a classified path into its components."""
+    if kind == PATH_KIND_UNC:
+        separator = _BACKSLASH
+    elif kind in (PATH_KIND_DRIVE, PATH_KIND_DRIVE_RELATIVE):
+        # Windows accepts either separator after a drive letter.
+        parts = re.split(r"[\\/]", remainder)
+        return tuple(part for part in parts if part)
+    elif kind == PATH_KIND_LITERAL_BACKSLASH:
+        # A literal backslash in a non-rooted spelling is data, not a
+        # separator, so only forward slashes split components here.
+        separator = _SLASH
+    else:
+        separator = _SLASH
+    return tuple(part for part in remainder.split(separator) if part)
+
+
+def _classify_manifest_path(path: str) -> ResolvedPath:
+    """
+    Split a manifest path spelling into a kind, an anchor, and components.
+
+    The anchor preserves the original spelling of the root (UNC share, drive
+    letter with separator, POSIX root, or an empty string) and the components
+    hold every remaining path element.
+    """
+    unc = _UNC_RE.match(path)
+    if unc:
+        anchor = path[: unc.end()]
+        remainder = path[unc.end() :].lstrip(_BACKSLASH)
+        return ResolvedPath(
+            PATH_KIND_UNC,
+            anchor,
+            _split_manifest_components(PATH_KIND_UNC, remainder),
+        )
+
+    drive_abs = _DRIVE_ABS_RE.match(path)
+    if drive_abs:
+        anchor = drive_abs.group(1) + _BACKSLASH
+        remainder = path[drive_abs.end() :]
+        return ResolvedPath(
+            PATH_KIND_DRIVE,
+            anchor,
+            _split_manifest_components(PATH_KIND_DRIVE, remainder),
+        )
+
+    drive_rel = _DRIVE_REL_RE.match(path)
+    if drive_rel:
+        anchor = drive_rel.group(1)
+        remainder = path[drive_rel.end() :]
+        return ResolvedPath(
+            PATH_KIND_DRIVE_RELATIVE,
+            anchor,
+            _split_manifest_components(PATH_KIND_DRIVE_RELATIVE, remainder),
+        )
+
+    if _POSIX_ROOT_RE.match(path):
+        return ResolvedPath(
+            PATH_KIND_POSIX,
+            _SLASH,
+            _split_manifest_components(PATH_KIND_POSIX, path[1:]),
+        )
+
+    if _BACKSLASH in path:
+        return ResolvedPath(
+            PATH_KIND_LITERAL_BACKSLASH,
+            "",
+            _split_manifest_components(PATH_KIND_LITERAL_BACKSLASH, path),
+        )
+
+    return ResolvedPath(
+        PATH_KIND_RELATIVE,
+        "",
+        _split_manifest_components(PATH_KIND_RELATIVE, path),
+    )
+
+
+def _prefix_matches(
+    resolved: ResolvedPath,
+    prefix: ResolvedPath,
+) -> bool:
+    """Whether *prefix* is a complete component prefix of *resolved*."""
+    if resolved.kind != prefix.kind or resolved.anchor != prefix.anchor:
+        return False
+    return resolved.parts[: len(prefix.parts)] == prefix.parts
+
+
+def _resolve_manifest_path(
+    path: str,
+    root_mappings: RootMapping | None,
+) -> ResolvedPath:
+    """
+    Resolve a manifest path against the declared mount-root mappings.
+
+    Mount roots declared by two different source machines that map to the same
+    dataset root resolve to the same zone and anchor.  When more than one
+    mapping matches, the entry with the deepest complete path-component prefix
+    wins.  A relative spelling only leaves its own zone when a mapping
+    explicitly binds it; without such a binding it is returned unchanged.
+    """
+    resolved = _classify_manifest_path(path)
+    if not root_mappings:
+        return resolved
+
+    best: tuple[int, ResolvedPath, ResolvedPath] | None = None
+    for raw_prefix, raw_target in root_mappings.items():
+        if not isinstance(raw_prefix, str) or not isinstance(raw_target, str):
+            continue
+        prefix = _classify_manifest_path(raw_prefix)
+        if not _prefix_matches(resolved, prefix):
+            continue
+        target = _classify_manifest_path(raw_target)
+        depth = len(prefix.parts) + (1 if prefix.anchor else 0)
+        if best is None or depth > best[0]:
+            best = (depth, prefix, target)
+
+    if best is None:
+        # No binding: keep the original spelling's classification, so an
+        # unbound relative path can never enter an absolute zone.
+        return resolved
+
+    _, prefix, target = best
+    tail = resolved.parts[len(prefix.parts) :]
+    return ResolvedPath(target.kind, target.anchor, (*target.parts, *tail))
+
+
+def manifest_path_factory(
+    str_split: StrParser,
+    root_mappings: RootMapping | None,
+) -> PathSplitter:
+    """
+    Create a path key function aware of manifest roots and source systems.
+
+    The input is classified from its raw spelling (UNC share, drive letter,
+    POSIX root, literal backslash, or a relative path) and mount roots
+    declared in *root_mappings* are folded onto a shared dataset root before
+    the components are handed to *str_split*.  The original value is never
+    mutated and nothing on the host filesystem is consulted.
+
+    The returned key starts with a single-element zone tuple so the distinct
+    path families never interleave, followed by the natural-sort key of each
+    path component.  File extensions are split off the final component only,
+    using the same heuristic as :func:`path_splitter`.  The zone marker is a
+    string so manifest path keys stay comparable with the numeric keys the
+    PATH algorithm produces for non-path inputs in the same comparison.
+    """
+
+    def func(x: PathArg) -> tuple[FinalTransform, ...]:
+        if isinstance(x, PurePath):
+            x = str(x)
+        kind, anchor, parts = _resolve_manifest_path(x, root_mappings)
+
+        components: list[str] = []
+        if anchor:
+            components.append(anchor)
+        if parts:
+            components.extend(parts[:-1])
+            components.extend(path_splitter(parts[-1]))
+
+        return (str(kind),), *map(str_split, components)
+
+    return func
 
 
 # noinspection PyIncorrectDocstring

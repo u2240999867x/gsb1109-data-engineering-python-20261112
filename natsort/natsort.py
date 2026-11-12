@@ -24,7 +24,7 @@ from natsort.ns_enum import NS_DUMB, NSType, ns
 from natsort.utils import NatsortInType, NatsortOutType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 # Common input and output types
 T = TypeVar("T")
@@ -128,6 +128,7 @@ def as_utf8(s: Any) -> Any:  # noqa: ANN401
 def natsort_keygen(
     key: Callable[[Any], NatsortInType] | None = None,
     alg: NSType = ns.DEFAULT,
+    root_mappings: Mapping[str, str] | None = None,
 ) -> Callable[[Any], NatsortOutType]:
     """
     Generate a key to sort strings and numbers naturally.
@@ -150,6 +151,18 @@ def natsort_keygen(
         This option is used to control which algorithm `natsort`
         uses when sorting. For details into these options, please see
         the :class:`ns` class documentation. The default is `ns.INT`.
+
+    root_mappings : mapping of str to str, optional
+        Only used with ``ns.PATH``.  Declares how mount roots recorded in a
+        collection manifest (a Windows UNC share, drive letter, or POSIX root
+        on any source machine) map onto a shared dataset root.  Paths are
+        interpreted purely from their spelling - the host filesystem is never
+        consulted.  When several mappings match, the deepest complete
+        path-component prefix wins, and only a relative value explicitly bound
+        by a mapping may leave the relative sort zone.  Passing any mapping,
+        even an empty one, enables manifest classification (UNC, drive,
+        POSIX, and literal-backslash spellings sort in distinct zones);
+        leaving this as `None` preserves the default ``ns.PATH`` behavior.
 
     Returns
     -------
@@ -179,6 +192,10 @@ def natsort_keygen(
     except TypeError:
         msg = "natsort_keygen: 'alg' argument must be from the enum 'ns'"
         raise ValueError(msg + f", got {alg!s}") from None
+
+    if root_mappings is not None and not (alg & ns.PATH):
+        msg = "natsort_keygen: 'root_mappings' requires the ns.PATH algorithm"
+        raise ValueError(msg)
 
     # Add the NS_DUMB option if the locale library is broken.
     if alg & ns.LOCALEALPHA and natsort.compat.locale.dumb_sort():
@@ -214,7 +231,10 @@ def natsort_keygen(
         final_transform,
     )
     if alg & ns.PATH:
-        string_func = utils.parse_path_factory(string_func)
+        if root_mappings is not None:
+            string_func = utils.manifest_path_factory(string_func, root_mappings)
+        else:
+            string_func = utils.parse_path_factory(string_func)
     bytes_func = utils.parse_bytes_factory(alg)
     num_func = utils.parse_number_or_none_factory(alg, sep, pre_sep)
 
@@ -248,6 +268,7 @@ def natsorted(
     key: Callable[[T], NatsortInType] | None = None,
     reverse: bool = False,
     alg: NSType = ns.DEFAULT,
+    root_mappings: Mapping[str, str] | None = None,
 ) -> list[T]:
     """
     Sort an iterable naturally.
@@ -270,6 +291,11 @@ def natsorted(
         This option is used to control which algorithm `natsort`
         uses when sorting. For details into these options, please see
         the :class:`ns` class documentation. The default is `ns.INT`.
+
+    root_mappings : mapping of str to str, optional
+        Only used with ``ns.PATH``.  Declares how mount roots recorded in a
+        collection manifest map onto a shared dataset root.  See
+        :func:`natsort_keygen` for the mapping and zone rules.
 
     Returns
     -------
@@ -295,7 +321,11 @@ def natsorted(
     """
     if alg & ns.PRESORT:
         seq = sorted(seq, reverse=reverse, key=str)
-    return sorted(seq, reverse=reverse, key=natsort_keygen(key, alg))
+    return sorted(
+        seq,
+        reverse=reverse,
+        key=natsort_keygen(key, alg, root_mappings=root_mappings),
+    )
 
 
 def humansorted(
@@ -418,6 +448,7 @@ def index_natsorted(
     key: Callable[[T], NatsortInType] | None = None,
     reverse: bool = False,
     alg: NSType = ns.DEFAULT,
+    root_mappings: Mapping[str, str] | None = None,
 ) -> list[int]:
     """
     Determine the list of the indexes used to sort the input sequence.
@@ -445,6 +476,11 @@ def index_natsorted(
         This option is used to control which algorithm `natsort`
         uses when sorting. For details into these options, please see
         the :class:`ns` class documentation. The default is `ns.INT`.
+
+    root_mappings : mapping of str to str, optional
+        Only used with ``ns.PATH``.  Declares how mount roots recorded in a
+        collection manifest map onto a shared dataset root.  See
+        :func:`natsort_keygen` for the mapping and zone rules.
 
     Returns
     -------
@@ -485,7 +521,10 @@ def index_natsorted(
     index_seq_pair = list(enumerate(seq))
     if alg & ns.PRESORT:
         index_seq_pair.sort(reverse=reverse, key=lambda x: str(itemgetter(1)(x)))
-    index_seq_pair.sort(reverse=reverse, key=natsort_keygen(newkey, alg))
+    index_seq_pair.sort(
+        reverse=reverse,
+        key=natsort_keygen(newkey, alg, root_mappings=root_mappings),
+    )
     return [x for x, _ in index_seq_pair]
 
 
