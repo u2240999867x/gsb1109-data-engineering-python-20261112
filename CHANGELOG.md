@@ -7,6 +7,7 @@ In Development
 * The IPv6 tag of a domain literal is now case-insensitive, as in the RFCs, so `me@[ipv6:::1]` is accepted (and normalized to `me@[IPv6:::1]`) when `allow_domain_literal=True`.
 * Internationalized domains with a right-to-left label are now rejected if any other label breaks the IDNA Bidi Rule (RFC 5893), such as a label starting with a digit. Such domains, like `1.xn--4dbc.com` and `xn--4dbc.1.com` (`1.אב.com` and `אב.1.com` in Unicode), could be displayed identically.
 * Faster validation of domains without Punycode (xn--) labels.
+* A new asyncio-native deliverability check, `validate_email_deliverability_async` in the `email_validator.deliverability` module, mirrors `validate_email_deliverability` using dnspython's async resolver. Concurrent calls for the same domain, resolver, and timeout share a single in-flight DNS check while each caller keeps its own deadline; the shared check is cancelled once its last waiter has left.
 
 2.3.0 (August 26, 2025)
 -----------------------

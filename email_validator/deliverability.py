@@ -1,10 +1,12 @@
-from typing import Any, Optional, TypedDict
+from typing import Any, Dict, Optional, Tuple, TypedDict
 
+import asyncio
 import ipaddress
 
 from .exceptions import EmailUndeliverableError
 
 import dns.resolver
+import dns.asyncresolver
 import dns.exception
 
 
@@ -152,6 +154,192 @@ def validate_email_deliverability(domain: str, domain_i18n: str, timeout: Option
 
     except Exception as e:
         # Unhandled conditions should not propagate.
+        raise EmailUndeliverableError(
+            "There was an error while checking if the domain name in the email address is deliverable: " + str(e)
+        ) from e
+
+    return deliverability_info
+
+
+class _InFlightCheck:
+    # A deliverability check that is currently being awaited by one or
+    # more concurrent callers. The underlying task is shared so that
+    # duplicate DNS queries for the same domain are not issued, but it
+    # is cancelled once its last waiter has left.
+    __slots__ = ("task", "waiters")
+
+    def __init__(self, task: "asyncio.Task[DeliverabilityInfo]") -> None:
+        self.task = task
+        self.waiters = 0
+
+
+# In-flight deliverability checks shared between concurrent callers,
+# keyed by (domain, resolver, timeout) so that checks that would use a
+# different resolver or a different check policy are isolated from
+# each other even for the same domain.
+_in_flight_checks: Dict[Tuple[str, Any, Optional[int]], _InFlightCheck] = {}
+
+
+async def validate_email_deliverability_async(domain: str, domain_i18n: str, timeout: Optional[int] = None, dns_resolver: Optional[dns.asyncresolver.Resolver] = None) -> DeliverabilityInfo:
+    # An asyncio-native version of validate_email_deliverability.
+    #
+    # Concurrent calls for the same domain, resolver, and timeout share
+    # a single in-flight check so that duplicate DNS queries are not
+    # issued. Each caller keeps its own deadline: if a caller's timeout
+    # expires or its task is cancelled, the other callers keep waiting,
+    # and the shared check (including any follow-up DNS queries it
+    # would still make) is cancelled only once its last waiter has
+    # left. A caller whose deadline expires gets the same
+    # "unknown-deliverability": "timeout" result that the synchronous
+    # version returns on a DNS timeout.
+
+    # If no dns.asyncresolver.Resolver was given, get dnspython's default
+    # resolver. Override the default resolver's timeout. This may affect
+    # other uses of dnspython in this process.
+    if dns_resolver is None:
+        from . import DEFAULT_TIMEOUT
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+        dns_resolver = dns.asyncresolver.get_default_resolver()
+        dns_resolver.lifetime = timeout
+    elif timeout is not None:
+        raise ValueError("It's not valid to pass both timeout and dns_resolver.")
+
+    key = (domain, dns_resolver, timeout)
+    check = _in_flight_checks.get(key)
+    if check is None:
+        check = _InFlightCheck(asyncio.ensure_future(
+            _validate_email_deliverability_async(domain, domain_i18n, dns_resolver)
+        ))
+
+        def _on_done(task: "asyncio.Task[DeliverabilityInfo]", key: Tuple[str, Any, Optional[int]] = key) -> None:
+            _in_flight_checks.pop(key, None)
+            if not task.cancelled():
+                task.exception()  # mark as retrieved in case no waiter is left
+
+        check.task.add_done_callback(_on_done)
+        _in_flight_checks[key] = check
+
+    check.waiters += 1
+    try:
+        if timeout is None:
+            # The deadline is enforced by the resolver itself.
+            return await asyncio.shield(check.task)
+        try:
+            # Shield the shared task so that this caller's deadline (or
+            # cancellation) does not cancel the check for the other
+            # waiters.
+            return await asyncio.wait_for(asyncio.shield(check.task), timeout)
+        except asyncio.TimeoutError:
+            return {
+                "unknown-deliverability": "timeout",
+            }
+    finally:
+        check.waiters -= 1
+        if check.waiters == 0 and not check.task.done():
+            # The last waiter left, so the check's result is no longer
+            # needed. Cancel it so that its in-flight and follow-up DNS
+            # queries are not needlessly carried out.
+            check.task.cancel()
+
+
+async def _validate_email_deliverability_async(domain: str, domain_i18n: str, dns_resolver: dns.asyncresolver.Resolver) -> DeliverabilityInfo:
+    # The asyncio-native equivalent of validate_email_deliverability,
+    # returning the same results for the same DNS responses. See that
+    # function for comments about the checks performed here.
+
+    deliverability_info: DeliverabilityInfo = {}
+
+    try:
+        try:
+            # Try resolving for MX records (RFC 5321 Section 5).
+            response = await dns_resolver.resolve(domain, "MX")
+
+            # For reporting, put them in priority order and remove the trailing dot in the qnames.
+            mtas = sorted([(r.preference, str(r.exchange).rstrip('.')) for r in response])
+
+            # RFC 7505: Null MX (0, ".") records signify the domain does not accept email.
+            mtas = [(preference, exchange) for preference, exchange in mtas
+                    if exchange != ""]
+            if len(mtas) == 0:  # null MX only
+                raise EmailUndeliverableError(f"The domain name {domain_i18n} does not accept email.")
+
+            deliverability_info["mx"] = mtas
+            deliverability_info["mx_fallback_type"] = None
+
+        except dns.resolver.NoAnswer:
+            # If there was no MX record, fall back to an A or AAAA record
+            # (RFC 5321 Section 5). Check A first since it's more common.
+            def is_global_addr(address: Any) -> bool:
+                try:
+                    ipaddr = ipaddress.ip_address(address)
+                except ValueError:
+                    return False
+                return ipaddr.is_global
+
+            try:
+                response = await dns_resolver.resolve(domain, "A")
+
+                if not any(is_global_addr(r.address) for r in response):
+                    raise dns.resolver.NoAnswer  # fall back to AAAA
+
+                deliverability_info["mx"] = [(0, domain)]
+                deliverability_info["mx_fallback_type"] = "A"
+
+            except dns.resolver.NoAnswer:
+
+                # If there was no A record, fall back to an AAAA record.
+                try:
+                    response = await dns_resolver.resolve(domain, "AAAA")
+
+                    if not any(is_global_addr(r.address) for r in response):
+                        raise dns.resolver.NoAnswer
+
+                    deliverability_info["mx"] = [(0, domain)]
+                    deliverability_info["mx_fallback_type"] = "AAAA"
+
+                except dns.resolver.NoAnswer as e:
+                    # If there was no MX, A, or AAAA record, then mail to
+                    # this domain is not deliverable.
+                    raise EmailUndeliverableError(f"The domain name {domain_i18n} does not accept email.") from e
+
+            # Check for a SPF (RFC 7208) reject-all record ("v=spf1 -all").
+            try:
+                response = await dns_resolver.resolve(domain, "TXT")
+                for rec in response:
+                    value = b"".join(rec.strings)
+                    if value.startswith(b"v=spf1 "):
+                        if value == b"v=spf1 -all":
+                            raise EmailUndeliverableError(f"The domain name {domain_i18n} does not send email.")
+            except dns.resolver.NoAnswer:
+                # No TXT records means there is no SPF policy, so we cannot take any action.
+                pass
+
+    except dns.resolver.NXDOMAIN as e:
+        # The domain name does not exist --- there are no records of any sort
+        # for the domain name.
+        raise EmailUndeliverableError(f"The domain name {domain_i18n} does not exist.") from e
+
+    except dns.resolver.NoNameservers:
+        # All nameservers failed to answer the query. This might be a problem
+        # with local nameservers, maybe? We'll allow the domain to go through.
+        return {
+            "unknown-deliverability": "no_nameservers",
+        }
+
+    except dns.exception.Timeout:
+        # A timeout could occur for various reasons, so don't treat it as a failure.
+        return {
+            "unknown-deliverability": "timeout",
+        }
+
+    except EmailUndeliverableError:
+        # Don't let these get clobbered by the wider except block below.
+        raise
+
+    except Exception as e:
+        # Unhandled conditions should not propagate. (asyncio.CancelledError
+        # is not an Exception and so propagates to allow cancellation.)
         raise EmailUndeliverableError(
             "There was an error while checking if the domain name in the email address is deliverable: " + str(e)
         ) from e
