@@ -31,6 +31,9 @@ changes from 2.1 to 2.2
 * Add support for nace revision 2.1 (thanks KathrinM)
 * Support the new Romanian ONRC format (thanks dotbit1)
 * Support new format for Brazilian CNPJ (thanks Cloves Oliveira)
+* Add a routing preview module that validates supplier master data columns
+  against their candidate modules, deduplicates old aliases and narrows the
+  possible number types using column- or supplier-level relations
 
 
 changes from 2.0 to 2.1

@@ -71,6 +71,7 @@ Helper functions and modules
    :toctree:
 
    exceptions
+   routing
 
 .. autofunction:: get_cc_module
 
