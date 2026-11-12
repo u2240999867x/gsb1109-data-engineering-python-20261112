@@ -35,6 +35,41 @@ pathspec.gitignore
 
 	.. autoclass:: Self
 
+
+pathspec.gitignore_tree
+-----------------------
+
+.. automodule:: pathspec.gitignore_tree
+
+	.. autoclass:: GitIgnoreTreeSpec
+		:members:
+		:show-inheritance:
+		:special-members: __init__, __len__
+
+	.. autoclass:: GitIgnoreLevel
+		:members:
+		:show-inheritance:
+
+	.. autoclass:: RuleOrigin
+		:members:
+		:show-inheritance:
+
+	.. autoclass:: TreeCheckResult
+		:members:
+		:show-inheritance:
+
+	.. autoclass:: TreeSelection
+		:members:
+		:show-inheritance:
+
+	.. autoclass:: SelectionDiff
+		:members:
+		:show-inheritance:
+
+	.. autofunction:: diff_selections
+
+	.. autoclass:: Self
+
 pathspec.backend
 ----------------
 

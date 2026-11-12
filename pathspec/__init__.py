@@ -6,6 +6,8 @@ The following classes are exposed from the root of the `pathspec` package:
 
 -	:class:`pathspec.gitignore.GitIgnoreSpec`
 
+-	:class:`pathspec.gitignore_tree.GitIgnoreTreeSpec`
+
 -	:class:`pathspec.pathspec.PathSpec`
 
 -	:class:`pathspec.pattern.Pattern`
@@ -15,6 +17,8 @@ The following classes are exposed from the root of the `pathspec` package:
 -	:class:`pathspec.util.RecursivePathError`
 
 The following functions are also exposed:
+
+-	:func:`pathspec.gitignore_tree.diff_selections`
 
 -	:func:`pathspec.util.lookup_pattern`
 
@@ -35,6 +39,9 @@ import warnings
 
 from .gitignore import (
 	GitIgnoreSpec)
+from .gitignore_tree import (
+	GitIgnoreTreeSpec,
+	diff_selections)
 from .pathspec import (
 	PathSpec)
 from .pattern import (
@@ -61,6 +68,7 @@ from . import patterns
 # are deliberately excluded.
 __all__ = [
 	'GitIgnoreSpec',
+	'GitIgnoreTreeSpec',
 	'PathSpec',
 	'Pattern',
 	'RecursivePathError',
@@ -70,6 +78,7 @@ __all__ = [
 	'__credits__',
 	'__license__',
 	'__version__',
+	'diff_selections',
 	'lookup_pattern',
 ]
 
