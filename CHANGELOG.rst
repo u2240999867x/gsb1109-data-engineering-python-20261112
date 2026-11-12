@@ -1,0 +1,778 @@
+..
+    THIS FILE IS MANAGED BY SCRIV.
+    DO NOT MANUALLY ADD CONTENT TO THIS FILE.
+
+CHANGELOG
+#########
+
+    Unreleased changes can be found in
+    `the changelog.d/ directory <https://github.com/jsonpath-ng/jsonpath-ng/tree/HEAD/changelog.d>`_.
+
+..  scriv-insert-here
+
+.. _changelog-1.16.0:
+
+1.16.0 - 2026-11-04
+===================
+
+Breaking changes
+----------------
+
+*   Parse an unquoted ``*`` to the new ``Wildcard()`` node.
+
+    ``$.*``, ``$[*]``, and ``$..*`` used to parse to ``Fields('*')`` or ``Slice()``.
+    Code that compares or inspects these parsed expressions must be updated.
+    The results of finding, updating, and filtering are unchanged.
+
+    This change can only affect code that first parses a JSONPath string
+    containing an unquoted wildcard character (``*``)
+    and then interacts with the resulting AST.
+
+Added
+-----
+
+*   Add a ``Wildcard`` node that selects every child of an object or array.
+
+Fixed
+-----
+
+*   Treat a quoted ``*`` as a field name, not as a wildcard.
+
+    Given an object like ``{"*": "multiply", "/": "divide"}``,
+    ``parse("$['*']").find(data)`` will now correctly return only ``["multiply"]``.
+
+*   Fix empty slices acting like wildcards that select member values of objects.
+
+    RFC 9535 says that a slice selects nothing from a value that is not an array.
+    Given ``{"x": 1}``, ``parse("$[:]").find(data)`` now correctly returns ``[]``.
+    The same applies to updating and filtering.
+
+    This may break code that relied on ``[:]`` or ``[::]`` selecting object members.
+    Use ``[*]`` to select the members of an object.
+
+Deprecated
+----------
+
+*   Deprecate interpreting ``Fields('*')`` as a wildcard.
+
+    ``Fields('*')`` continues to incorrectly act like a wildcard,
+    but in version 2.0.0 it will select only a field named ``*``.
+
+    Replace usages with ``Wildcard()``.
+
+*   Deprecate interpreting ``Slice()`` with no parameters as a wildcard.
+
+    ``Slice()`` continues to incorrectly select member values of an object,
+    but in version 2.0.0 it will select nothing from an object.
+
+    Replace usages with ``Wildcard()``.
+
+Documentation
+-------------
+
+*   Add Sphinx documentation, configured to build on Read the Docs.
+*   Fix the JSON syntax of two README examples.
+*   Remove several v1.5.0 changelog items that were duplicated from v1.4.3.
+
+.. _changelog-1.15.0:
+
+1.15.0 - 2026-10-29
+===================
+
+Fixed
+-----
+
+*   Fix the ``sub`` and ``split`` extensions taking quadratic time
+    to reject malformed definitions.
+
+Changed
+-------
+
+*   Relicense the CLI code under the Apache 2.0 license.
+
+    Relicensing is allowed under the terms of the previous license.
+
+*   Make the CLI print matches as valid JSONL.
+
+    Previously the output was simply Python ``repr()`` output,
+    so ``{"json": true}`` was output as ``{'json': True}``
+    and could not be re-parsed as JSON.
+
+*   Support running the CLI via ``python -m jsonpath_ng``.
+
+Documentation
+-------------
+
+*   Fix the ``sub`` example in the README, which had too many backslashes.
+
+.. _changelog-1.14.0:
+
+1.14.0 - 2026-10-26
+===================
+
+Fixed
+-----
+
+*   Fix parsing in executables created by PyInstaller. (:issue:`320`)
+
+    Since v1.10.0, PLY tables have been pre-generated to improve performance.
+    However, PLY imports pre-generated modules via dynamic string lookups,
+    while PyInstaller finds modules to bundle based on ``import`` statements.
+    This made the PLY tables invisible to PyInstaller when freezing an app,
+    and resulted in ``ModuleNotFoundError`` runtime failures when the app ran.
+
+    The pre-generated tables are now explicitly imported.
+
+Deprecated
+----------
+
+*   Deprecate parsing unquoted words as comparison operands in filter selectors.
+
+    Support for parsing unquoted strings will be removed in version 2.0.0.
+
+    For example: ``foo`` in ``$[?@.a == foo]`` is now deprecated.
+    Replace usages with a quoted string, like ``$[?@.a == 'foo']``.
+
+Documentation
+-------------
+
+*   Remove a deprecated ``|`` suggestion from the README.
+
+.. _changelog-1.13.0:
+
+1.13.0 - 2026-10-23
+===================
+
+Added
+-----
+
+*   Support the RFC 9535 logical operators ``&&`` and ``||`` in filters. (:issue:`27`)
+
+    For example, ``parse("$[?@.a == 1 || @.b == 2 && @.c == 3]")``.
+
+    Note that filters are currently only supported in the ``jsonpath_ng.ext`` module.
+
+    ``&&`` binds more tightly than ``||``, and parentheses group expressions.
+    The operators are valid only inside a filter.
+
+Fixed
+-----
+
+*   Fix ``Slice.filter()`` taking quadratic time to remove array elements.
+*   Fix ``Slice.filter()`` removing the wrong elements from an array.
+*   Return ``[]`` when a slice's step size is ``0``.
+
+    For example, ``parse("$[::0]").find([1,2,3])`` now returns ``[]``.
+
+    This aligns with RFC 9535, section 2.3.4.2.2.
+
+*   Fix ``!=`` filter comparisons with literals.
+
+    This includes fixing comparisons between string and integer values,
+    as well as fixing comparisons when the target path doesn't exist.
+
+    For example, ``parse("$[?@.a != 1]").find([{"b": 1}])`` finds ``{"b": 1}``.
+    Previously, ``{"b": 1}`` was excluded because it didn't have an ``"a"`` field.
+
+    For example, ``parse("$[?@.a != 1]").find([{"a": "x"}])`` finds ``{"a": "x"}``.
+    Previously, ``{"a": "x"}`` was excluded.
+
+    This change aligns with RFC 9535, section 2.3.5.2.2.
+
+*   Fix a ``TypeError`` that occurs when a filter orders values of different types.
+
+    For example, ``parse("$[?@.a < 1]").find([{"a": None}])`` now finds nothing
+    instead of raising a ``TypeError``.
+
+*   Stop speculatively coercing strings to integers in filter comparisons.
+
+    For example, ``parse("$[?@.a == 1]").find([{"a": " +0_1"}])`` now finds nothing.
+    Previously, the string ``" +0_1"`` was converted to an integer before comparing
+    and would incorrectly match.
+
+    Note that this also means that simpler numeric strings will no longer match.
+    For example, ``parse("$[?@.a == 1]").find([{"a": "1"}])`` now finds nothing.
+
+*   Serialize filters so that they can be parsed again.
+
+    Note that ``this`` in a filter selector is now replaced with ``@``,
+    which is the RFC 9535 compliant syntax.
+
+    Similarly, strings are single-quoted and ``&`` is replaced with ``&&``
+    as is required by RFC 9535.
+
+    For example, ``str(parse("$[?`this`.a == 1 & @.b == x]"))``
+    now returns ``$[?@.a == 1 && @.b == 'x']``.
+
+*   Quote field names that begin with ``@`` when serializing a query,
+    unless the ``@`` is followed by a letter or an underscore.
+
+    For example, ``str(jsonpath_ng.ext.parse("$['@']"))`` now returns ``$.'@'``.
+    Previously it returned ``$.@``, which ``jsonpath_ng.ext`` parsed as the current node.
+
+Deprecated
+----------
+
+*   The ``|`` (union) operator between paths is deprecated.
+
+    A ``DeprecationWarning`` is issued when the operator is used.
+    It will be removed in version 2.0.0.
+
+    There is no RFC 9535 equivalent.
+
+    A now-deprecated path like ``($.a) | ($.b)`` can be replaced with code like this:
+
+    ..  code-block:: python
+
+        matches = parse("$.a").find(data) + parse("$.b").find(data)
+
+    Beware that ``|`` binds tighter than ``.``.
+    Unparenthesized paths like ``a.b | c.d`` are interpreted as ``a.(b | c).d``,
+    so write each full path when migrating and test the paths and results for equivalency.
+
+*   The ``&`` (intersection) operator between paths is deprecated.
+
+    A ``DeprecationWarning`` is issued when the ``&`` (intersection) operator is used.
+    It will be removed in version 2.0.0.
+
+    There is no RFC 9535 equivalent.
+
+*   The ``&`` (logical AND) operator in filters is deprecated.
+
+    A ``DeprecationWarning`` is issued when the ``&`` (logical AND) operator is used.
+    It will be removed in version 2.0.0.
+
+    Its RFC 9535 equivalent is ``&&``.
+    Use ``&&`` instead of ``&`` in filters.
+
+*   The ``Union`` and ``Intersect`` classes are deprecated.
+
+    A ``DeprecationWarning`` is issued when they are accessed.
+    They will be removed in version 2.0.0.
+
+Documentation
+-------------
+
+*   Update the README.
+
+.. _changelog-1.12.0:
+
+1.12.0 - 2026-10-20
+===================
+
+Added
+-----
+
+*   Support a query on the right-hand side of a filter comparison. (:issue:`79`)
+
+    For example: ``$.items[?@.a == @.b]`` and ``$.items[?@.v == $.ref.v]``.
+
+    The query must start with ``@`` or ``$``
+    and may only contain name and index segments,
+    as required by RFC 9535.
+
+Fixed
+-----
+
+*   Resolve ``$`` to the root node inside a filter. (:issue:`66`)
+
+    Previously, ``$`` was incorrectly treated as an alias of ``@``.
+    Use ``@`` to refer to the element being tested.
+
+    This change improves RFC 9535 compliance.
+
+*   Skip index updates for non-list inputs and out-of-range array indices.
+
+*   Fix crashes and other issues with filtering by array index.
+
+    Out-of-range indices and non-array values are now ignored,
+    and queries that select several indices
+    (for example, ``$[0,1]``, ``$[0,2]``, or ``$[0,-3]``)
+    now remove exactly the selected elements.
+
+Project administration
+----------------------
+
+*   Add type annotations for the PLY lexers and parsers.
+*   Add type annotations to many of the JSONPath interfaces.
+
+.. _changelog-1.11.0:
+
+1.11.0 - 2026-10-16
+===================
+
+Breaking changes
+----------------
+
+*   When applying an index to a string, nothing will be returned.
+
+    Previously, an index applied to a string would "find" individual characters.
+    For example, ``$[0]`` applied to ``"abc"`` would find ``"a"``.
+
+    This change improves RFC 9535 compliance.
+
+*   Slices and the ``[*]`` wildcard no longer coerce scalars and objects into arrays. (:issue:`96`)
+
+    Previously, ``$[*]`` applied to ``"abc"`` or ``5`` would find the value itself,
+    and ``$[*]`` applied to ``{"a": 1}`` would find the whole object.
+    This also caused ``$..[*]`` to return phantom nodes,
+    such as the root object and a second copy of each string.
+
+    Now, slices like ``[0:2]`` find nothing unless they are applied to an array,
+    and ``[*]`` finds the member values of an object or the elements of an array
+    and nothing from a scalar value.
+
+    This change improves RFC 9535 compliance.
+
+Fixed
+-----
+
+*   Fix ``RecursionError`` when paths using ``..`` are applied to deeply nested data.
+
+    It is still possible to encounter ``RecursionError``.
+    For example, very long JSONPath expressions can still raise ``RecursionError``.
+
+    Note that cyclic data structures can trigger indefinite execution,
+    as can updating data with a value that the path can match again.
+    Cyclic data structures are impossible to encounter in JSON
+    and can only be constructed programmatically in Python.
+
+*   Make ``Descendants.find()`` runtimes scale linearly with the depth of the data.
+
+*   Fix ``TypeError`` when an index like ``[0]`` is applied to a scalar value.
+
+    These values now match nothing, as required by RFC 9535.
+
+*   Fix ``..[*]`` omitting the member values of objects. (:issue:`96`)
+
+*   Fix ``*`` (used as a field) omitting the elements of arrays. (:issue:`11, 164`)
+
+    ``$.*`` and ``$..*`` now find array elements as well as object member values.
+
+    ``update()`` and ``filter()`` now also act on array elements for these wildcards.
+
+*   Fix a parse error when a filter follows ``..``, as in ``$..[?@.key]``. (:issue:`46`)
+
+    The path now parses and selects every matching array element or object member value
+    at any depth, as required by RFC 9535.
+
+*   Allow filters to compare against JSON ``null`` values (``[?(@.v == null)]``). (:issue:`49`)
+
+    An unquoted ``null`` no longer matches the string ``"null"``.
+    To compare a value to the word ``"null"``, quote it (``[?(@.v == 'null')]``).
+    ``null`` also continues to work as a field name, as in ``$.null``.
+
+    ``!= null`` now also matches members that are missing,
+    and ``<``, ``<=``, ``>``, and ``>=`` no longer raise a ``TypeError``
+    when compared with ``null``.
+
+*   Allow ``true`` and ``false`` to be used as field names in the extended parser.
+
+    For example: ``$.true`` and ``$[?@.false == false]``.
+
+    These previously raised a ``JsonPathParserError``.
+
+    Unquoted ``true`` and ``false`` on the right-hand side of a filter comparison
+    continue to be boolean literals.
+
+*   Stop treating booleans as numbers in filter comparisons.
+
+    Previously ``[?@.v == true]`` also matched ``1`` and ``[?@.v == 1]`` also matched ``true``.
+    A boolean is now never equal to a number, which follows RFC 9535.
+
+Documentation
+-------------
+
+*   Include RFC 9535 and errata in the ``docs/rfc9535/`` directory.
+
+.. _changelog-1.10.1:
+
+1.10.1 - 2026-10-12
+===================
+
+Fixed
+-----
+
+*   Fix a ``TypeError`` crash that can occur when filtering scalar values.
+
+    This can only occur when a ``Filter`` has been instantiated without expressions.
+    (This usage is now deprecated.)
+
+Deprecated
+----------
+
+*   Deprecate instantiating ``Filter`` with no expressions.
+
+    It is impossible to encounter this deprecation via a parsed JSONPath string.
+
+    This deprecation helps align programmatic usage with RFC 9535,
+    which doesn't syntactically support filters without expressions.
+
+    This usage will raise an exception in version 2.0.0.
+
+.. _changelog-1.10.0:
+
+1.10.0 - 2026-10-09
+===================
+
+Changed
+-------
+
+*   Use pre-generated PLY lex/parse tables. (:issue:`121`)
+
+    Base parser instantiation is now over 20 times faster,
+    and extended parser instantiation is over 50 times faster.
+    In addition, actual parsing is over 50% faster.
+
+    This change also allows downstream projects
+    to run with Python optimizations enabled.
+
+Deprecated
+----------
+
+*   The ``debug`` parameter, given when instantiating lexers and parsers,
+    is now deprecated and has no effect.
+
+    The ``debug`` parameter will be removed in version 2.0.0.
+
+    To prepare for the change, remove the parameter from instantiation sites.
+
+*   The ``ExtentedJsonPathParser``, which was renamed in v1.8.0,
+    is now deprecated.
+
+    The ``ExtentedJsonPathParser`` name will be removed in version 2.0.0.
+
+    To prepare for the change, use the name ``ExtendedJsonPathParser``.
+
+*   The ``jsonpath_ng.__version__`` attribute is now deprecated.
+
+    The ``__version__`` attribute will be removed in version 2.0.0.
+
+    To prepare for the change, import ``importlib.metadata``
+    and use ``importlib.metadata.version("jsonpath-ng")``
+    to get the package version.
+
+Project administration
+----------------------
+
+*   Use Trusted Publishing in CI to publish to PyPI.
+*   Use CodSpeed to track runtime performance.
+*   Add a suite of pre-commit linters and fixers to enforce code standards.
+*   Use scriv to manage the changelog.
+
+    This eliminates trivial merge conflicts in PRs
+    caused by overlapping CHANGELOG updates.
+
+.. _changelog-1.9.1:
+
+1.9.1 - 2026-10-06
+==================
+
+Fixed
+-----
+
+- Add ``requires-python`` to the project metadata in ``pyproject.toml``. (:issue:`266`)
+
+  This ensures the package can only be installed on supported Python versions.
+
+.. _changelog-1.9.0:
+
+1.9.0 - 2026-10-05 [YANKED]
+===========================
+
+   NOTE: This version was yanked from PyPI.
+
+   It could be installed on unsupported Python versions
+   due to a missing ``requires-python`` in the project metadata.
+
+   This was fixed in v1.9.1.
+
+Added
+-----
+
+- Support Python 3.15.
+- Add a ``py.typed`` marker.
+- Support negation of relative existence queries in extended filter expressions (e.g. ``$[?(!@.field)]``).
+
+Fixed
+-----
+
+- Ignore non-mapping values when updating named fields instead of raising ``TypeError``. (:issue:`104`)
+
+- Return no matches for negative array indices beyond the start of an array,
+  matching the behavior of out-of-range positive indices. (:issue:`203`)
+
+- Fix extended filter equality against an integer literal truncating float values,
+  so ``[?(@.v = 0)]`` no longer matches an element with ``v = 0.6``. (:issue:`227`)
+
+- ``update()`` with an in-place callback returning ``None`` no longer overwrites the field with ``None``. (:issue:`163`)
+
+- Fix an ``AttributeError`` that occurs when an ``Index`` instance is hashed. (:issue:`224`)
+
+- ``Index.find`` no longer raises ``KeyError`` when applied to a dict
+  (e.g. ``$.*[0]``, where ``*`` matched a dict value).
+  It now matches nothing, as the docstring promises. (:issue:`93`)
+
+- Fix extended parser handling of field names that start with ``true`` or ``false``.
+
+- Stop serializing ``Child`` paths with surrounding parentheses. (:issue:`215`)
+
+- Avoid mutating dictionaries while evaluating extended filter expressions.
+
+- ``str()`` of an ``Index`` with comma-separated indices (e.g. ``[0,1]``) no longer raises ``TypeError``.
+
+- Fix broken ``Slice`` serialization behavior.
+
+  Previously, a slice like ``[0:]`` would serialize to ``[]``,
+  and a slice like ``[::2]`` would serialize to ``[:2]``.
+
+Removed
+-------
+
+- Drop support for Python 3.10.
+
+.. _changelog-1.8.0:
+
+1.8.0 - 2026-02-24
+==================
+
+Added
+-----
+
+- Support Python 3.13 and 3.14
+- Typing for IDE autocomplete
+- Support for EMOJI and CJK Unicode
+- Support for ``DatumInContext`` in-place updating
+- Support equality checking of ``Operation`` instances
+- Support string serialization of ``Union`` and ``Intersect`` instances
+- Support comma-separated indices
+- Add some type annotations
+
+Changed
+-------
+
+- Rename ``ExtentedJsonPathParser``
+- Remove ply dependency
+
+Fixed
+-----
+
+- ``[*]`` now correctly returns results when applied to a ``False`` or other falsy non-``None`` value;
+  previously it returned an empty list. (:issue:`198`)
+- ``update()`` no longer raises ``TypeError`` when a value in the data structure is a boolean. (:issue:`73`)
+- ``update_or_create()`` now works correctly when the root data structure is a list. (:issue:`108`)
+- Fix single constant case
+- Update field filter to resolve wildcard path issue
+- Vendor copy of ply and remove pickle support from the vendored copy to resolve `CVE-2025-56005 <https://nvd.nist.gov/vuln/detail/CVE-2025-56005>`__
+- Fix string serialization throughout the library to enforce roundtrip parsing consistency.
+
+  - Fields are more conservatively enclosed in quotion marks
+    This fixes serialization and re-parsing of ``"00"``, ``'%'``, ``'0@'`` and ``"&'"``.
+  - ``Operation`` instances can now be serialized.
+    This fixes serialization of ``0-@`` and ``A -A``.
+  - ``SortedThis`` instances can now be serialized and re-parsed.
+    This fixes serialization of ``0[/0]``.
+  - ``Child`` precedence is now preserved using parentheses during serialization.
+    This ensures that serialized strings like ``a..b[c]`` serialize and re-parse identically.
+
+- Fix parsing and string serialization of numeric-only identifiers.
+  This fixes parsing of ``10``, which was parsed as two separate fields.
+- Fix equality checks for ``SortedThis`` instances.
+- Fix bool filter type to handle None values
+
+Removed
+-------
+
+- Python 3.8 and 3.9 no longer supported
+
+.. _changelog-1.7.0:
+
+1.7.0 - 2024-10-11
+==================
+
+- Allow raw numeric values to be used as keys
+- Add ``wherenot``
+- Added EZRegex pattern for the split extension regex
+- Added negative and \* indices and quotes to ``Split`` parameters
+- Typo: duplicate line removed.
+- Added ``path`` extension that exposes datum's path from the jsonpath expression itself.
+- Remove Python 3.7 support
+- Only construct the parse table once
+- updated test for ``jsonpath.py`` changes
+- fix for Updating a json object fails if the value of a key is boolean (:issue:`73`)
+- Add Codespaces configuration
+- Add ``.editorconfig``
+- Fix a GitHub workflow schema issue
+
+.. _changelog-1.6.1:
+
+1.6.1 - 2024-01-11
+==================
+
+- Bump actions/setup-python from 4 to 5
+- Bump github/codeql-action from 2 to 3
+- Use tox to run the test suite against all supported Pythons
+- Fix a typo in the README
+- Add a test case
+- Fix issue with lambda based updates
+- Remove unused code from the test suite
+- Refactor ``tests/test_parser.py``
+- Refactor ``tests/test_lexer.py``
+- Refactor ``tests/test_jsonpath_rw_ext.py``
+- De-duplicate the parser test cases
+- Refactor ``tests/test_jsonpath.py``
+- Refactor ``tests/test_jsonpath.py``
+- Refactor ``tests/test_exceptions.py``
+- Remove a test that merely checks exception inheritance
+- Refactor ``tests/test_examples.py``
+- Add pytest-randomly to shake out auto_id side effects
+- Bump actions/checkout from 3 to 4
+- Include the test suite in coverage reports
+- Remove tests that don't affect coverage and contribute nothing
+- Reformat ``tests/test_create.py``
+- Remove ``test_doctests``, which is a no-op
+- Demonstrate that there are no doctests
+- Remove the ``coveralls`` dependency
+- Migrate ``tests/bin/test_jsonpath.py`` to use pytest
+- remove Python2 crumbs
+- Add CodeQL analysis
+- Remove the ``oslotest`` dependency
+- Fix running CI against incoming PRs
+- Support, and test against, Python 3.12
+- Update the currently-tested CPython versions in the README
+- Remove an unused Travis CI config file
+- Add a Dependabot config to keep GitHub action versions updated
+- add a test for the case when root element is a list
+- Fix issue with assignment in case root element is a list.
+- Fix typo in README
+- Fix test commands in Makefile
+- Fix .coveragerc path
+- Simplify clean in Makefile
+- Refactor unit tests for better errors
+- test case for existing auto id
+- Add more examples to README (thanks @baynes)
+- fixed typo
+- Don't fail when regex match is attempted on non-strings
+- added step in slice
+- Add additional tests
+- Add ``keys`` keyword
+
+.. _changelog-1.6.0:
+
+1.6.0 - 2023-09-13
+==================
+
+- Enclose field names containing literals in quotes
+- Add note about extensions
+- Remove documentation status link
+- Update supported versions in ``setup.py``
+- Add ``LICENSE`` file
+- Code cleanup
+- Remove dependency on six
+- Update build status badge
+- (origin/github-actions, github-actions) Remove testscenarios dependency
+- Remove pytest version constraints
+- Add testing with GitHub actions
+- Escape back slashes in tests to avoid DeprecationWarning.
+- Use raw strings for regular expressions to avoid DeprecationWarning.
+- refactor(package): remove dependency for decorator
+- Merge pull request :pr:`128` from michaelmior/hashable
+- Make path instances hashable
+- Merge pull request :pr:`122` from snopoke/snopoke-patch-1
+- Add more detail to filter docs.
+- remove incorrect parenthesis in filter examples
+- Merge pull request :pr:`119` from snopoke/patch-1
+- add 'sub' line with function param names
+- readme formatting fixes
+- chore(history): update
+- Update ``__init__.py``
+
+.. _changelog-1.5.3:
+
+1.5.3 - 2021-07-05
+==================
+
+- Update ``__init__.py``
+- Update ``setup.py``
+- Merge pull request :pr:`72` from kaapstorm/find_or_create
+- Tests
+- Add ``update_or_create()`` method
+- Merge pull request :pr:`68` from kaapstorm/example_tests
+- Merge pull request :pr:`70` from kaapstorm/exceptions
+- Add/fix ``__eq__()``
+- Add tests based on Stefan Goessner's examples
+- Tests
+- Allow callers to catch JSONPathErrors
+
+.. _changelog-1.5.2:
+
+1.5.2 - 2020-09-07
+==================
+
+- Merge pull request :pr:`41` from josephwhite13/allow-dictionary-filtering
+- Merge pull request :pr:`48` from back2root/master
+- Check for null value.
+- Merge pull request :pr:`40` from memborsky/add-regular-expression-contains-support
+- feat: support regular expression for performing contains (=~) filtering
+- if datum.value is a dictionary, filter on the list of values
+
+.. _changelog-1.5.1:
+
+1.5.1 - 2020-03-09
+==================
+
+- feat(version): bump
+- fix(setup): strip extension
+
+.. _changelog-1.5.0:
+
+1.5.0 - 2020-03-06
+==================
+
+- feat(version): bump to 1,5.0
+- Merge pull request :pr:`13` from dcreemer/master
+- fix(travis): remove python 3.4 (deprecated)
+- refactor(docs): delete coverage badge
+- Merge pull request :pr:`25` from rahendatri/patch-1
+- Merge pull request :pr:`26` from guandalf/contains_operator
+- Merge pull request :pr:`31` from borysvorona/master
+- refactor(travis): update python versions
+- Merge pull request :pr:`34` from dchourasia/patch-1
+- Updated ``Filter.py`` to implement update function
+- added hook for catching null value instead of empty list in path
+- Ignore vscode folder
+- Contains operator implementation
+- Update ``requirements-dev.txt``
+- setuptools>=18.5
+- update setuptools
+- update cryptography
+- new version of cryptography requires it
+- entry point conflict with https://pypi.org/project/jsonpath/
+- add ``str()`` method
+- clean up
+- remove extra ``print()``
+- refactor(docs): remove codesponsor
+- feat(docs): add sponsor banner
+- Update ``.travis.yml``
+- feat(History): add History file
+
+.. _changelog-1.4.3:
+
+1.4.3 - 2017-08-24
+==================
+
+- fix(travis-ci): ignore versions
+- feat(requirements): add missing pytest-cov dependency
+- refactor(requirements): use version constraint
+- fix: remove ``.cache`` files
+- feat: add required files
+- fix(travis-ci): install proper packages
+- refactor(``setup.py``): update description
+- refactor(docs): remove downloads badge
+- fix(tests): pass unit tests
+- feat(docs): add TravisCI and PyPI badges
+- Merge pull request :pr:`2` from tomas-fp/master
+- feat(docs): update readme notes
+- feat(setup): increase version
+- Merge pull request :pr:`1` from kmmbvnr/patch-1
+- Fix github url on pypi

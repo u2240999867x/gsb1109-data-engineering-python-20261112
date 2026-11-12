@@ -1,0 +1,19 @@
+# Python compiled bytecode
+__pycache__/
+
+# Build and test artifacts
+/.codspeed/
+/.coverage*
+/.hypothesis/
+/.mypy_cache/
+/.pytest_cache/
+/.slyp_cache/
+/.tox/
+
+/build/
+/dist/
+/htmlcov/
+
+*.egg-info/
+
+/requirements/*/poetry.lock

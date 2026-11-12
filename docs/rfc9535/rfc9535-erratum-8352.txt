@@ -1,0 +1,33 @@
+Erratum 8352 - RFC 9535
+Source: https://www.rfc-editor.org/errata/eid8352
+
+Status:         Held for Document Update
+Type:           Technical
+Reported by:    Vladimír Gorej
+Date reported:  2025-03-24
+Verifier:       Andy Newton
+Last updated:   2026-02-25 19:02:39
+Section:        2.3.5.1
+
+Original text
+-------------
+comparable          = literal /
+                      singular-query / ; singular query value
+                      function-expr    ; ValueType
+
+Corrected text
+--------------
+comparable          = singular-query / ; singular query value
+                      function-expr /  ; ValueType
+                      literal
+
+Notes
+-----
+The ABNF grammars in RFC 9535 were designed to be directly usable with PEG (Parsing Expression Grammar) parsers.
+
+However, PEG parsers will fail to parse $[?blt(1==1)] or $[?true(1)==0] with the grammar as given, as they employ prioritized choice, where the order matters.
+
+In the order given, they will try to match the `literal` rule in `function-argument` with the input `1==1`, and find that the `1` indeed matches a `number`, completing the match for `function-argument` and preempting the other choices.  The intended rest of the `function-argument`, `==1` does not match anything, and the rule fails.
+By putting the more complex `logical-expr` first, the whole `1==1` matches, and the rule succeeds as intended.
+
+Similary, the function name `true` matches as the literal `true` instead, and preempts parsing `true(1)` as the more complex `function-expr`.  Putting the `literal` choice last prevents the preemptive match.

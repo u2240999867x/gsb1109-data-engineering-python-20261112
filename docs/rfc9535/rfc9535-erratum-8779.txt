@@ -1,0 +1,34 @@
+Erratum 8779 - RFC 9535
+Source: https://www.rfc-editor.org/errata/eid8779
+
+Status:         Held for Document Update
+Type:           Technical
+Reported by:    Alan Painter
+Date reported:  2026-02-22
+Verifier:       Andy Newton
+Last updated:   2026-02-23 12:02:29
+Section:        ERRATUM 8354
+
+Original text
+-------------
+;; N.B. This text is from the Erratum 8534 and not from the original RFC
+
+function-argument   = logical-expr /
+                      filter-query / ; (includes singular-query)
+                      function-expr /
+                      literal
+
+Corrected text
+--------------
+function-argument   = filter-query / ; (includes singular-query)
+                      logical-expr /
+                      function-expr /
+                      literal
+
+Notes
+-----
+Accepting the affirmations of ERRATUM 8354, especially that the ABNF grammars are designed for PEG (Parsing Expression Grammar) parsers.
+
+Whereas Erratum 8354 proposes making the logical-expr a higher priority than literal (i.e. for PEG parser, earlier in the list of alternative elements) for the function-argument rule, it causes a new problem by placing logical-expr before the filter-query element, an ordering that will break the parsing of a JSONPATH query such as $[?value(@.*)==4] because the function argument @.* will be recognized as a logical-expr instead of a filter-query and, subsequently, as per section 2.4.3 Well Typedness of Function Expressions subsection 2, the sole formal parameter for the value() function extension is of NodesType and hence requires a filter-query for type correctness.
+
+NOTE: The RFC Editor has been asked to reclassify Errata ID 8354 as Hold For Document Update.
