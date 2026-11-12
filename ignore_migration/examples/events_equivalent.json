@@ -1,0 +1,240 @@
+{
+  "alphabet": [
+    "/",
+    "0",
+    "1",
+    "2",
+    "-",
+    "=",
+    "a",
+    "d",
+    "e",
+    "g",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "s",
+    "t",
+    "v",
+    "x",
+    "."
+  ],
+  "contracts": [
+    {
+      "id": "warehouse",
+      "start": "s0",
+      "states": {
+        "s0": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "e": "e1",
+            "t": "m1"
+          }
+        },
+        "e1": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "v": "e2"
+          }
+        },
+        "e2": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "e": "e3"
+          }
+        },
+        "e3": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "n": "e4"
+          }
+        },
+        "e4": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "t": "e5"
+          }
+        },
+        "e5": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "s": "e6"
+          }
+        },
+        "e6": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "/": "p0"
+          }
+        },
+        "p0": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "d": "p1"
+          }
+        },
+        "p1": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "t": "p2"
+          }
+        },
+        "p2": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "=": "p3"
+          }
+        },
+        "p3": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "0": "p4",
+            "1": "p4",
+            "2": "p4"
+          }
+        },
+        "p4": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": "dt",
+          "transitions": {
+            "0": "p4",
+            "1": "p4",
+            "2": "p4",
+            "-": "p4",
+            "/": "f0"
+          }
+        },
+        "f0": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "a": "f1",
+            "e": "f1",
+            "g": "f1",
+            "k": "f1",
+            "l": "f1",
+            "o": "f1",
+            "p": "f1",
+            "x": "f1",
+            ".": "f1"
+          }
+        },
+        "f1": {
+          "dir": false,
+          "leaf_types": [
+            "data",
+            "log"
+          ],
+          "partition": null,
+          "transitions": {
+            "a": "f1",
+            "e": "f1",
+            "g": "f1",
+            "k": "f1",
+            "l": "f1",
+            "o": "f1",
+            "p": "f1",
+            "x": "f1",
+            ".": "f1"
+          }
+        },
+        "m1": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "m": "m2"
+          }
+        },
+        "m2": {
+          "dir": false,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "p": "m3"
+          }
+        },
+        "m3": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "/": "m4"
+          }
+        },
+        "m4": {
+          "dir": true,
+          "leaf_types": [],
+          "partition": null,
+          "transitions": {
+            "a": "m5",
+            "e": "m5",
+            "g": "m5",
+            "k": "m5",
+            "l": "m5",
+            "o": "m5",
+            "p": "m5",
+            "x": "m5",
+            ".": "m5"
+          }
+        },
+        "m5": {
+          "dir": false,
+          "leaf_types": [
+            "data",
+            "log"
+          ],
+          "partition": null,
+          "transitions": {
+            "a": "m5",
+            "e": "m5",
+            "g": "m5",
+            "k": "m5",
+            "l": "m5",
+            "o": "m5",
+            "p": "m5",
+            "x": "m5",
+            ".": "m5"
+          }
+        }
+      }
+    }
+  ],
+  "old_rules": [
+    "*.log",
+    "tmp/",
+    "!keep.log"
+  ],
+  "new_rules": [
+    "tmp/",
+    "*.log",
+    "!keep.log"
+  ]
+}
