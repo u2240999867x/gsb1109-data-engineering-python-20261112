@@ -1,0 +1,186 @@
+[
+    {
+        "record_id": "R-001",
+        "document_id": "D-001",
+        "purpose": "should_fix",
+        "label": "Product title with Latin-1/UTF-8 mojibake that must be repaired",
+        "original": "SchÃ¶ne Tee-Set",
+        "expected": "Schöne Tee-Set"
+    },
+    {
+        "record_id": "R-001",
+        "document_id": "D-001-REEXPORT",
+        "purpose": "should_fix",
+        "label": "Duplicate export of R-001; must be counted once",
+        "original": "SchÃ¶ne Tee-Set",
+        "expected": "Schöne Tee-Set"
+    },
+    {
+        "record_id": "R-002",
+        "document_id": "D-001",
+        "purpose": "should_fix",
+        "label": "Product title containing mojibake for a check mark",
+        "original": "âœ” No problems",
+        "expected": "✔ No problems"
+    },
+    {
+        "record_id": "R-003",
+        "document_id": "D-002",
+        "purpose": "should_fix",
+        "label": "Product title where curly quotes are normalized to straight quotes",
+        "original": "She said “hi” and left",
+        "expected": "She said \"hi\" and left"
+    },
+    {
+        "record_id": "R-004",
+        "document_id": "D-002",
+        "purpose": "should_fix",
+        "label": "Product title with an HTML entity and curly quotes",
+        "original": "Tom &amp; Jerry “best”",
+        "expected": "Tom & Jerry \"best\""
+    },
+    {
+        "record_id": "R-005",
+        "document_id": "D-003",
+        "purpose": "should_fix",
+        "label": "Product title with a Latin ligature and curly quotes",
+        "original": "ﬁle “report”",
+        "expected": "file \"report\""
+    },
+    {
+        "record_id": "R-006",
+        "document_id": "D-003",
+        "purpose": "should_fix",
+        "label": "Composite title: one region fixed, one region wrongly retained, one region not recognized",
+        "original": "SchÃ¶n | hĂ i | pi√π",
+        "expected": "Schön | hài | più"
+    },
+    {
+        "record_id": "R-007",
+        "document_id": "D-004",
+        "purpose": "should_fix",
+        "label": "Italian mojibake that ftfy fails to recognize: a false retain",
+        "original": "Sarai ricontattato dal nostro Esperto al pi√π presto.",
+        "expected": "Sarai ricontattato dal nostro Esperto al più presto."
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-01",
+        "purpose": "should_keep",
+        "label": "Documentation deliberately displaying mojibake; same string as R-002",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-02",
+        "purpose": "should_keep",
+        "label": "Second export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-03",
+        "purpose": "should_keep",
+        "label": "Third export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-04",
+        "purpose": "should_keep",
+        "label": "Fourth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-05",
+        "purpose": "should_keep",
+        "label": "Fifth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-06",
+        "purpose": "should_keep",
+        "label": "Sixth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-07",
+        "purpose": "should_keep",
+        "label": "Seventh export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-08",
+        "purpose": "should_keep",
+        "label": "Eighth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-09",
+        "purpose": "should_keep",
+        "label": "Ninth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-101",
+        "document_id": "EXPORT-10",
+        "purpose": "should_keep",
+        "label": "Tenth export of the same documentation record",
+        "original": "âœ” No problems",
+        "expected": "âœ” No problems"
+    },
+    {
+        "record_id": "R-102",
+        "document_id": "D-102",
+        "purpose": "should_keep",
+        "label": "Manga romaji title with a non-breaking space; ftfy's known synthetic false positive",
+        "original": "MISUTÂ AJIKKO",
+        "expected": "MISUTÂ AJIKKO"
+    },
+    {
+        "record_id": "R-103",
+        "document_id": "D-103",
+        "purpose": "should_keep",
+        "label": "Documentation keeping curly quotes on purpose; same string as R-003",
+        "original": "She said “hi” and left",
+        "expected": "She said “hi” and left"
+    },
+    {
+        "record_id": "R-104",
+        "document_id": "D-104",
+        "purpose": "should_keep",
+        "label": "Documentation displaying raw C1 control characters",
+        "original": "demo\u0093q\u0094 end",
+        "expected": "demo\u0093q\u0094 end"
+    },
+    {
+        "record_id": "R-105",
+        "document_id": "D-105",
+        "purpose": "should_keep",
+        "label": "Documentation showing an HTML entity literally; same string as R-004",
+        "original": "Tom &amp; Jerry “best”",
+        "expected": "Tom &amp; Jerry “best”"
+    },
+    {
+        "record_id": "R-106",
+        "document_id": "D-106",
+        "purpose": "should_keep",
+        "label": "Correctly decoded French text that ftfy already leaves alone",
+        "original": "IL Y MARQUÉ…",
+        "expected": "IL Y MARQUÉ…"
+    }
+]
