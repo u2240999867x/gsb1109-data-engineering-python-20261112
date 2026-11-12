@@ -126,10 +126,12 @@ testpaths = [
 addopts = [
     "--color=yes",
     # Building executables is slow; run these with `-m pyinstaller` instead.
-    "-m=not pyinstaller",
+    # Building wheels and fresh venvs is slow; run with `-m release_wheel`.
+    "-m=not pyinstaller and not release_wheel",
 ]
 markers = [
     "pyinstaller: Test PyInstaller builds and app runs",
+    "release_wheel: Build a real wheel and replay rules in a fresh read-only venv",
 ]
 filterwarnings = [
     # Escalate warnings to errors.

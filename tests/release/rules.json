@@ -1,0 +1,1235 @@
+{
+  "sentinel": "SENT",
+  "document": {
+    "rows": [
+      {
+        "name": "x0",
+        "alias": "a0",
+        "score": 10,
+        "active": true
+      },
+      {
+        "name": "x1",
+        "alias": "a1",
+        "score": 4,
+        "active": false
+      },
+      {
+        "name": "x2",
+        "alias": "a2",
+        "score": 7,
+        "active": true
+      }
+    ],
+    "meta": {
+      "kind": "ingest",
+      "nested": {
+        "kind": "deep"
+      }
+    },
+    "@": "at-sign",
+    "@foo": "at-field",
+    "1": "numeric-key",
+    "a.c": "dotted-key",
+    "*": "star-key",
+    "true": true,
+    "null": null,
+    "bar-baz": "hyphen-key",
+    "键": "cjk-key"
+  },
+  "rules": [
+    {
+      "id": "plain-child",
+      "category": "plain",
+      "expression": "rows[0].name",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "plain-wildcard",
+      "category": "plain",
+      "expression": "rows[*].alias",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].alias",
+            "read_chain": [
+              "rows",
+              0,
+              "alias"
+            ],
+            "old": "a0"
+          },
+          {
+            "reported_path": "rows.[1].alias",
+            "read_chain": [
+              "rows",
+              1,
+              "alias"
+            ],
+            "old": "a1"
+          },
+          {
+            "reported_path": "rows.[2].alias",
+            "read_chain": [
+              "rows",
+              2,
+              "alias"
+            ],
+            "old": "a2"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "alias"
+          ],
+          [
+            "rows",
+            1,
+            "alias"
+          ],
+          [
+            "rows",
+            2,
+            "alias"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].alias",
+            "read_chain": [
+              "rows",
+              0,
+              "alias"
+            ],
+            "old": "a0"
+          },
+          {
+            "reported_path": "rows.[1].alias",
+            "read_chain": [
+              "rows",
+              1,
+              "alias"
+            ],
+            "old": "a1"
+          },
+          {
+            "reported_path": "rows.[2].alias",
+            "read_chain": [
+              "rows",
+              2,
+              "alias"
+            ],
+            "old": "a2"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "alias"
+          ],
+          [
+            "rows",
+            1,
+            "alias"
+          ],
+          [
+            "rows",
+            2,
+            "alias"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "plain-slice",
+      "category": "plain",
+      "expression": "rows[0:2].name",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[1].name",
+            "read_chain": [
+              "rows",
+              1,
+              "name"
+            ],
+            "old": "x1"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            1,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[1].name",
+            "read_chain": [
+              "rows",
+              1,
+              "name"
+            ],
+            "old": "x1"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            1,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "plain-multifield",
+      "category": "plain",
+      "expression": "rows[0][name,alias]",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[0].alias",
+            "read_chain": [
+              "rows",
+              0,
+              "alias"
+            ],
+            "old": "a0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            0,
+            "alias"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[0].alias",
+            "read_chain": [
+              "rows",
+              0,
+              "alias"
+            ],
+            "old": "a0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            0,
+            "alias"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "plain-where",
+      "category": "plain",
+      "expression": "(rows[*] where active).name",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[1].name",
+            "read_chain": [
+              "rows",
+              1,
+              "name"
+            ],
+            "old": "x1"
+          },
+          {
+            "reported_path": "rows.[2].name",
+            "read_chain": [
+              "rows",
+              2,
+              "name"
+            ],
+            "old": "x2"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            1,
+            "name"
+          ],
+          [
+            "rows",
+            2,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          },
+          {
+            "reported_path": "rows.[1].name",
+            "read_chain": [
+              "rows",
+              1,
+              "name"
+            ],
+            "old": "x1"
+          },
+          {
+            "reported_path": "rows.[2].name",
+            "read_chain": [
+              "rows",
+              2,
+              "name"
+            ],
+            "old": "x2"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            1,
+            "name"
+          ],
+          [
+            "rows",
+            2,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "ext-filter",
+      "category": "extended",
+      "expression": "rows[?@.score >= 10].name",
+      "base": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathLexerError",
+        "message_contains": "Unexpected character"
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].name",
+            "read_chain": [
+              "rows",
+              0,
+              "name"
+            ],
+            "old": "x0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "ext-regex",
+      "category": "extended",
+      "expression": "rows[?@.name =~ 'x.*'].alias",
+      "base": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathLexerError",
+        "message_contains": "Unexpected character"
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "rows.[0].alias",
+            "read_chain": [
+              "rows",
+              0,
+              "alias"
+            ],
+            "old": "a0"
+          },
+          {
+            "reported_path": "rows.[1].alias",
+            "read_chain": [
+              "rows",
+              1,
+              "alias"
+            ],
+            "old": "a1"
+          },
+          {
+            "reported_path": "rows.[2].alias",
+            "read_chain": [
+              "rows",
+              2,
+              "alias"
+            ],
+            "old": "a2"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "alias"
+          ],
+          [
+            "rows",
+            1,
+            "alias"
+          ],
+          [
+            "rows",
+            2,
+            "alias"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "ext-sort",
+      "category": "extended",
+      "expression": "rows[/score][*].name",
+      "base": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathLexerError",
+        "message_contains": "Unexpected character"
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "[0].name",
+            "read_chain": [
+              0,
+              "name"
+            ],
+            "old": "x1"
+          },
+          {
+            "reported_path": "[1].name",
+            "read_chain": [
+              1,
+              "name"
+            ],
+            "old": "x2"
+          },
+          {
+            "reported_path": "[2].name",
+            "read_chain": [
+              2,
+              "name"
+            ],
+            "old": "x0"
+          }
+        ],
+        "updated_columns": [
+          [
+            "rows",
+            0,
+            "name"
+          ],
+          [
+            "rows",
+            1,
+            "name"
+          ],
+          [
+            "rows",
+            2,
+            "name"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": true
+      }
+    },
+    {
+      "id": "root-dollar",
+      "category": "root_relative",
+      "expression": "$.meta.kind",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "root-descendants",
+      "category": "root_relative",
+      "expression": "$..kind",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          },
+          {
+            "reported_path": "meta.nested.kind",
+            "read_chain": [
+              "meta",
+              "nested",
+              "kind"
+            ],
+            "old": "deep"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ],
+          [
+            "meta",
+            "nested",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          },
+          {
+            "reported_path": "meta.nested.kind",
+            "read_chain": [
+              "meta",
+              "nested",
+              "kind"
+            ],
+            "old": "deep"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ],
+          [
+            "meta",
+            "nested",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "root-reset",
+      "category": "root_relative",
+      "expression": "meta.$.meta.kind",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "meta.kind",
+            "read_chain": [
+              "meta",
+              "kind"
+            ],
+            "old": "ingest"
+          }
+        ],
+        "updated_columns": [
+          [
+            "meta",
+            "kind"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "this-backtick",
+      "category": "root_relative",
+      "expression": "`this`",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "`this`",
+            "read_chain": []
+          }
+        ],
+        "updated_columns": [
+          []
+        ],
+        "replaces_document": true,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "`this`",
+            "read_chain": []
+          }
+        ],
+        "updated_columns": [
+          []
+        ],
+        "replaces_document": true,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "root-bare",
+      "category": "root_relative",
+      "expression": "$",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "$",
+            "read_chain": []
+          }
+        ],
+        "updated_columns": [
+          []
+        ],
+        "replaces_document": true,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "$",
+            "read_chain": []
+          }
+        ],
+        "updated_columns": [
+          []
+        ],
+        "replaces_document": true,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "at-sign",
+      "category": "special_key",
+      "expression": "@",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'@'",
+            "read_chain": [
+              "@"
+            ],
+            "old": "at-sign"
+          }
+        ],
+        "updated_columns": [
+          [
+            "@"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "`this`",
+            "read_chain": []
+          }
+        ],
+        "updated_columns": [
+          []
+        ],
+        "replaces_document": true,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "at-field",
+      "category": "special_key",
+      "expression": "@foo",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "@foo",
+            "read_chain": [
+              "@foo"
+            ],
+            "old": "at-field"
+          }
+        ],
+        "updated_columns": [
+          [
+            "@foo"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "@foo",
+            "read_chain": [
+              "@foo"
+            ],
+            "old": "at-field"
+          }
+        ],
+        "updated_columns": [
+          [
+            "@foo"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-numeric",
+      "category": "special_key",
+      "expression": "1",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'1'",
+            "read_chain": [
+              "1"
+            ],
+            "old": "numeric-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "1"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'1'",
+            "read_chain": [
+              "1"
+            ],
+            "old": "numeric-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "1"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-dotted",
+      "category": "special_key",
+      "expression": "'a.c'",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'a.c'",
+            "read_chain": [
+              "a.c"
+            ],
+            "old": "dotted-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "a.c"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'a.c'",
+            "read_chain": [
+              "a.c"
+            ],
+            "old": "dotted-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "a.c"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-star",
+      "category": "special_key",
+      "expression": "'*'",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'*'",
+            "read_chain": [
+              "*"
+            ],
+            "old": "star-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "*"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'*'",
+            "read_chain": [
+              "*"
+            ],
+            "old": "star-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "*"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-true",
+      "category": "special_key",
+      "expression": "true",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "true",
+            "read_chain": [
+              "true"
+            ],
+            "old": true
+          }
+        ],
+        "updated_columns": [
+          [
+            "true"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "true",
+            "read_chain": [
+              "true"
+            ],
+            "old": true
+          }
+        ],
+        "updated_columns": [
+          [
+            "true"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-null",
+      "category": "special_key",
+      "expression": "null",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "null",
+            "read_chain": [
+              "null"
+            ],
+            "old": null
+          }
+        ],
+        "updated_columns": [
+          [
+            "null"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "null",
+            "read_chain": [
+              "null"
+            ],
+            "old": null
+          }
+        ],
+        "updated_columns": [
+          [
+            "null"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-hyphen",
+      "category": "special_key",
+      "expression": "bar-baz",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "bar-baz",
+            "read_chain": [
+              "bar-baz"
+            ],
+            "old": "hyphen-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "bar-baz"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "bar-baz",
+            "read_chain": [
+              "bar-baz"
+            ],
+            "old": "hyphen-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "bar-baz"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      }
+    },
+    {
+      "id": "key-cjk",
+      "category": "special_key",
+      "expression": "键",
+      "base": {
+        "outcome": "ok",
+        "targets": [
+          {
+            "reported_path": "'键'",
+            "read_chain": [
+              "键"
+            ],
+            "old": "cjk-key"
+          }
+        ],
+        "updated_columns": [
+          [
+            "键"
+          ]
+        ],
+        "replaces_document": false,
+        "wrong_column": false
+      },
+      "ext": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathLexerError",
+        "message_contains": "Unexpected character"
+      }
+    },
+    {
+      "id": "bad-malformed",
+      "category": "negative",
+      "expression": "foo.",
+      "base": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathParserError",
+        "message_contains": "Parse error"
+      },
+      "ext": {
+        "outcome": "unsupported_syntax",
+        "error": "JsonPathParserError",
+        "message_contains": "Parse error"
+      }
+    }
+  ]
+}

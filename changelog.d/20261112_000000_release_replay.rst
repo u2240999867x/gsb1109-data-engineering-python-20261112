@@ -1,0 +1,11 @@
+Project administration
+----------------------
+
+*   Add a release replay that exercises the same JSONPath ingestion rules from
+    both the source tree and a real built wheel.
+
+    The replay distinguishes loader failures from unsupported grammar and from
+    successful queries that write to an unexpected column, replays plain,
+    extended, root-relative and special-key rules in a fresh read-only
+    interpreter at every optimization level, and pins the documented
+    base-vs-extended semantic divergences to a frozen catalog.
