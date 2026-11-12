@@ -9,3 +9,4 @@ language data exchange.
 
    api
    advanced
+   rewrite

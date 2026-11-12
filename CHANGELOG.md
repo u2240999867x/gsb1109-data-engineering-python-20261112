@@ -1,3 +1,14 @@
+# Unreleased
+
+- Add pure Python field level rewriting of packed messages (`msgpack.rewrite`):
+  `Replace`, `Delete` and `Copy` instructions addressed by `Path`/`MapEntry`
+  can rewrite a single forward streamed MessagePack event without decoding the
+  whole message. Unselected bytes, extension types, float widths and field
+  order are preserved; each event is validated and published transactionally,
+  with working memory bounded by the nesting depth, the plan size and a fixed
+  I/O window (spilling to reclaimable temp files for larger spools).
+
+
 # 1.2.4
 
 Release Date: 2026-10-27

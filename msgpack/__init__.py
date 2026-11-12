@@ -16,6 +16,21 @@ else:
     except ImportError:
         from .fallback import Packer, Unpacker, unpackb
 
+from .rewrite import (
+    Copy,
+    Delete,
+    MapEntry,
+    Path,
+    PathError,
+    PlanError,
+    Replace,
+    RewritePlan,
+    StreamRewriter,
+    TruncatedMessage,
+    rewrite_stream,
+    rewriteb,
+)
+
 
 def pack(o, stream, **kwargs):
     """

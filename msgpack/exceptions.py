@@ -23,6 +23,10 @@ class StackError(ValueError, UnpackException):
     """Too nested"""
 
 
+class RewriteError(ValueError, UnpackException):
+    """Base class for errors raised while rewriting packed messages."""
+
+
 # Deprecated.  Use ValueError instead
 UnpackValueError = ValueError
 
