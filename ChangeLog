@@ -1,0 +1,113 @@
+2023-07-19	jsonmerge	1.9.2
+	* Fix failing tests with jsonschema>=4.18.0.
+
+2023-07-13	jsonmerge	1.9.1
+	* Require jsonschema 4.17.3 or earlier since some tests currently fail
+	  with 4.18.0 and later releases.
+
+2022-11-02	jsonmerge	1.9.0
+
+	* Add sortByRef and sortReverse options for the append and
+	  arrayMergeById strategies.
+	* Fix failing tests with jsonschema>=4.15.0.
+	* Fix warning about iter_errors use that was deprecated around
+	  jsonschema 4.10.1.
+	* Drop support for jsonschema<=2.4.0.
+
+2021-01-23	jsonmerge	1.8.0
+
+	* Allow "idRef" option for arrayMergeById strategy to be an array of
+	  pointers.
+	* Warn that "meta" argument is deprecated.
+
+2019-09-01	jsonmerge	1.7.0
+
+	* Add "merge_options" argument to the Merger.merge method, a more
+	  generic replacement for the "meta" argument. "meta" argument still
+	  works, however its use is now deprecated and it may be removed in a
+	  future release. Third-party code that subclasses the Strategy class
+	  and depends on the "meta" argument may need to be updated.
+	* Add arrayMergeByIndex merge strategy.
+
+
+2019-05-15	jsonmerge	1.6.1
+
+	* Fix assertion failure when object contains a float NaN value.
+
+2019-03-14	jsonmerge	1.6.0
+
+	* Add validatorclass argument to Merge constructor.
+	* Fix errors in reference resolution with jsonschema>=3.0.0.
+	* This release removes the requirement for jsonschema<3.0.0 in
+	  setup.py.
+
+2018-11-05	jsonmerge	1.5.2
+
+	* Fix exception on Python 2.7 when objects contain non-ASCII keys.
+	* Require jsonschema<3.0.0 in setup.py since some tests currently fail
+	  with jsonschema 3.0.0 pre-releases.
+	* More descriptive error messages in ArrayMergeById strategy.
+
+2018-05-01	jsonmerge	1.5.1
+
+	* Fix exception when additionalProperties keyword is a boolean value.
+	* Fix an issue with arrayMergeById strategy, where a wrong list item was
+	  merged in some cases, or an "Unresolvable JSON pointer" exception
+	  raised. See issue #31 on GitHub (thanks to fdearle).
+
+2018-03-23	jsonmerge	1.5.0
+
+	* Fix "maximum recursion depth exceeded" in get_schema() with schemas
+	  that have recursive references.
+	* Allow a merge strategy to be defined at the same level as "anyOf",
+	  "allOf" and "oneOf" keywords (thanks to Henrique Cabral).
+	* Add reference to the offending JSON value in exceptions thrown by
+	  jsonmerge.
+	* Add "discard" merge strategy.
+	* Raise SchemaError when encountering an unknown merge strategy name.
+
+2017-06-05	jsonmerge	1.4.0
+
+	* More consistent handling of $ref references in get_schema(). Internal
+	  references are now followed, but always kept unresolved in the final
+	  result instead of replacing them with the referenced part of the
+	  document. External references are never followed. This removes the
+	  need to call resolve_refs() in custom merge strategies.
+	* Support for "oneOf" schema keyword.
+	* Fix compatibility with jsonschema > 2.4.0.
+	* Remove support for Python 2.6.
+
+2017-04-02	jsonmerge	1.3.0
+
+	* Add "objClass" option for selection of an alternative class for
+	  storage of JSON objects, like OrderedDict (thanks to Ray Plante).
+	* Deprecate jsonmerge use with Python 2.6.
+
+2016-07-18	jsonmerge	1.2.1
+
+	* Fix RefResolutionError when merging properties with slash or tilde
+	  characters.
+	* Add LICENSE file.
+
+2016-05-13	jsonmerge	1.2.0
+
+	* Fix handling of additionalProperties (thanks to nxkb).
+	* Add optional debug output through the logging module.
+	* Fix arrayMergeById strategy when base instance has no "id" property.
+
+2014-09-20	jsonmerge	1.1.0
+
+	* Add ArrayMergeById strategy (thanks to Sarah Bird).
+	* merge() and get_schema() methods now raise more specific exception
+	  classes on error (BaseInstanceError, HeadInstanceError, SchemaError).
+	* Rename "unique" option for Version strategy to "ignoreDups".
+	* Fix duplicate entries with Version strategy even when "ignoreDups"
+	  was True (thanks to Sarah Bird).
+	* Always add "type" keyword when making new objects in get_schema().
+	* Remove "maxItems" and "uniqueItems" keywords in get_schema() for
+	  Append strategy.
+	* Use setuptools for packaging (thanks to Sarah Bird).
+
+2014-08-19	jsonmerge	1.0.0
+
+	* First release
