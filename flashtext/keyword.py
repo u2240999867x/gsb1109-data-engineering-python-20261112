@@ -2,6 +2,8 @@ import os
 import string
 import io
 
+from flashtext.damerau import DamerauTrieMatcher
+
 
 class KeywordProcessor(object):
     """KeywordProcessor
@@ -52,6 +54,8 @@ class KeywordProcessor(object):
         self.keyword_trie_dict = dict()
         self.case_sensitive = case_sensitive
         self._terms_in_trie = 0
+        self._max_keyword_len = None
+        self._damerau_matcher = None
 
     def __len__(self):
         """Number of terms present in the keyword_trie_dict
@@ -149,6 +153,7 @@ class KeywordProcessor(object):
             if self._keyword not in current_dict:
                 status = True
                 self._terms_in_trie += 1
+                self._max_keyword_len = None
             current_dict[self._keyword] = clean_name
         return status
 
@@ -195,6 +200,7 @@ class KeywordProcessor(object):
                 # successfully removed keyword
                 status = True
                 self._terms_in_trie -= 1
+                self._max_keyword_len = None
         return status
 
     def __iter__(self):
@@ -580,6 +586,147 @@ class KeywordProcessor(object):
         if span_info:
             return keywords_extracted
         return [value[0] for value in keywords_extracted]
+
+    def extract_fuzzy_entities(self, sentence, max_cost=2, span_info=False):
+        """Extract canonical entities using unrestricted Damerau-Levenshtein.
+
+        Unlike :meth:`extract_keywords`, whose ``max_cost`` mode only applies
+        Levenshtein edits, this method also counts an adjacent letter
+        transposition as a single edit (unrestricted Damerau-Levenshtein, a
+        single character may participate in consecutive edits).  For example
+        ``CA`` is at distance 2 from ``ABC``.
+
+        The search is driven by the keyword trie instead of computing a full
+        string distance against every dictionary entry.  Candidate spans are
+        anchored at word boundaries, and every canonical entity is reported at
+        most once: aliases reaching the same clean name are merged, and equal
+        distances from *different* entities are all returned so a human can
+        arbitrate the ambiguity.
+
+        Args:
+            sentence (str): Line of text where we will search for entities.
+            max_cost (int): Maximum Damerau-Levenshtein budget.
+            span_info (bool): When True, return dictionaries containing the
+                canonical entity, the matching aliases, the distance and the
+                original ``(start, end)`` character span. When False, only the
+                list of canonical entities is returned.
+
+        Returns:
+            list: Matches ordered by position, then by ascending distance.
+                Each match is a dict with ``entity``, ``aliases``,
+                ``distance``, ``ambiguous`` and ``span`` keys when
+                ``span_info`` is True.
+        """
+        if not sentence:
+            return []
+        if max_cost < 0:
+            raise ValueError("max_cost should be a non-negative integer")
+        working_sentence = sentence
+        if not self.case_sensitive:
+            working_sentence = sentence.lower()
+
+        if self._max_keyword_len is None:
+            self._max_keyword_len = max(
+                (len(term) for term in self.get_all_keywords()),
+                default=0,
+            )
+        window_limit = self._max_keyword_len + max_cost
+        if self._damerau_matcher is None:
+            self._damerau_matcher = DamerauTrieMatcher(
+                self.keyword_trie_dict,
+                self._keyword,
+                max_cost,
+                self.non_word_boundaries,
+            )
+        else:
+            self._damerau_matcher.max_cost = max_cost
+        matcher = self._damerau_matcher
+        matcher.non_word_boundaries = self.non_word_boundaries
+        matcher.reset_counters()
+
+        boundaries = self._word_boundaries(working_sentence)
+        results = []
+        occupied = [False] * len(working_sentence)
+        for start in boundaries:
+            max_end = min(len(working_sentence), start + window_limit)
+            candidates = matcher.search(working_sentence, start, max_end)
+            if not candidates:
+                continue
+
+            min_distance = candidates[0].distance
+            best = [
+                candidate for candidate in candidates
+                if candidate.distance == min_distance
+            ]
+            # The shortest span is used to block overlapping extractions;
+            # tied entities with different spans are kept in the payload.
+            chosen = min(best, key=lambda candidate: candidate.span[1])
+            span_start, span_end = chosen.span
+            if any(occupied[span_start:span_end]):
+                continue
+
+            if len(best) == 1:
+                match = {
+                    'entity': chosen.entity,
+                    'aliases': chosen.aliases,
+                    'distance': min_distance,
+                    'ambiguous': False,
+                    'span': chosen.span,
+                }
+            else:
+                match = {
+                    'entity': None,
+                    'aliases': sorted({
+                        alias
+                        for candidate in best
+                        for alias in candidate.aliases
+                    }),
+                    'distance': min_distance,
+                    'ambiguous': True,
+                    'span': chosen.span,
+                    'candidates': [
+                        {
+                            'entity': candidate.entity,
+                            'aliases': candidate.aliases,
+                            'span': candidate.span,
+                        }
+                        for candidate in best
+                    ],
+                }
+            results.append(match)
+            for position in range(span_start, span_end):
+                occupied[position] = True
+
+        results.sort(key=lambda match: (match['span'][0], match['distance']))
+        if span_info:
+            return results
+        return [
+            match['entity'] if not match['ambiguous']
+            else [candidate['entity'] for candidate in match['candidates']]
+            for match in results
+        ]
+
+    def _word_boundaries(self, sentence):
+        """Offsets in ``sentence`` where a word character run starts."""
+        boundaries = []
+        at_word_start = True
+        for index, char in enumerate(sentence):
+            is_word_char = char in self.non_word_boundaries
+            if is_word_char and at_word_start:
+                boundaries.append(index)
+            at_word_start = not is_word_char
+        return boundaries
+
+    @property
+    def damerau_access_count(self):
+        """Number of trie nodes entered by the last Damerau-Levenshtein search.
+
+        Use it to assert that branches whose prefix cannot fit the remaining
+        budget are pruned before reaching their leaves.
+        """
+        if self._damerau_matcher is None:
+            return 0
+        return self._damerau_matcher.access_count
 
     def replace_keywords(self, sentence, max_cost=0):
         """Searches in the string for all keywords present in corpus.

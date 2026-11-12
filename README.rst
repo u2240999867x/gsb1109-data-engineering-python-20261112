@@ -76,6 +76,34 @@ Span of keywords extracted
     >>> keywords_found
     >>> # [('New York', 7, 16), ('Bay Area', 21, 29)]
 
+Fuzzy entity extraction (unrestricted Damerau-Levenshtein)
+    Use ``extract_fuzzy_entities`` when brand names contain typos such as an
+    adjacent letter transposition. A transposition counts as a single edit and
+    the same character may take part in consecutive edits, so the unrestricted
+    distance from ``CA`` to ``ABC`` is 2 (not 3). The search walks the keyword
+    trie and prunes branches as soon as their row exceeds the budget, so wholly
+    unrelated prefixes are never explored down to their leaves.
+
+    >>> from flashtext import KeywordProcessor
+    >>> keyword_processor = KeywordProcessor()
+    >>> keyword_processor.add_keyword('nike', 'Nike Inc')
+    >>> keyword_processor.add_keyword('ab', 'Entity A')
+    >>> keyword_processor.add_keyword('cb', 'Entity B')
+    >>> keyword_processor.extract_fuzzy_entities('i love nkie', max_cost=1, span_info=True)
+    >>> # [{'entity': 'Nike Inc', 'aliases': ['nike'], 'distance': 1,
+    >>> #   'ambiguous': False, 'span': (7, 11)}]
+
+    Aliases reaching the same canonical entity are merged. When different
+    entities are tied at the minimum distance, ``ambiguous`` is True and every
+    candidate is returned for human review instead of guessing one.
+
+    >>> keyword_processor.extract_fuzzy_entities('xb', max_cost=1, span_info=True)
+    >>> # [{'entity': None, ..., 'ambiguous': True,
+    >>> #   'candidates': [{'entity': 'Entity A', ...}, {'entity': 'Entity B', ...}]}]
+
+    The number of trie nodes entered by the most recent search is exposed on
+    ``damerau_access_count`` to verify that impossible branches stay pruned.
+
 Get Extra information with keywords extracted
     >>> from flashtext import KeywordProcessor
     >>> kp = KeywordProcessor()
