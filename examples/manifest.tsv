@@ -1,0 +1,17 @@
+logs/
+logs/2026-11-10.parquet	1000
+logs/2026-11-11.parquet	1200
+raw/
+raw/keep/
+raw/keep/dim_user.csv	50000
+raw/keep/secret.txt	5
+raw/events/
+raw/events/part=2026-11-10/
+raw/events/part=2026-11-10/data.json	800000
+staging/
+staging/keep.txt	10
+staging/scratch.txt	20
+main/
+main/fact_order.csv	3000000
+main/temp.tmp	1
+main/debug.log	4000

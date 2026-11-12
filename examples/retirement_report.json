@@ -1,0 +1,203 @@
+{
+  "baseline": {
+    "ingested_rows": 3000000,
+    "total_rows": 3856236,
+    "match_calls": 153,
+    "match_pairs": 153,
+    "max_per_pair": 1
+  },
+  "deletions": [
+    {
+      "line_no": 1,
+      "kind": "注释/空行(无操作)",
+      "text": "# 采集排除规则(gitignore 语义, 匹配即不进仓)",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 0,
+      "match_pairs": 0
+    },
+    {
+      "line_no": 2,
+      "kind": "排除",
+      "text": "logs/",
+      "net_rows": 2200,
+      "gained_rows": 2200,
+      "lost_rows": 0,
+      "partitions": {
+        "logs": {
+          "gained": 2200,
+          "lost": 0
+        }
+      },
+      "changed_leaves": [
+        {
+          "path": "logs/2026-11-10.parquet",
+          "rows": 1000,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 2,
+          "after_rule_line": null
+        },
+        {
+          "path": "logs/2026-11-11.parquet",
+          "rows": 1200,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 2,
+          "after_rule_line": null
+        }
+      ],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 3,
+      "kind": "排除",
+      "text": "*.tmp",
+      "net_rows": 1,
+      "gained_rows": 1,
+      "lost_rows": 0,
+      "partitions": {
+        "main": {
+          "gained": 1,
+          "lost": 0
+        }
+      },
+      "changed_leaves": [
+        {
+          "path": "main/temp.tmp",
+          "rows": 1,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 3,
+          "after_rule_line": null
+        }
+      ],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 4,
+      "kind": "排除",
+      "text": "raw/",
+      "net_rows": 850000,
+      "gained_rows": 850000,
+      "lost_rows": 0,
+      "partitions": {
+        "raw": {
+          "gained": 850000,
+          "lost": 0
+        }
+      },
+      "changed_leaves": [
+        {
+          "path": "raw/events/part=2026-11-10/data.json",
+          "rows": 800000,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 4,
+          "after_rule_line": null
+        },
+        {
+          "path": "raw/keep/dim_user.csv",
+          "rows": 50000,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 4,
+          "after_rule_line": 5
+        }
+      ],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 5,
+      "kind": "否定",
+      "text": "!raw/keep/",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 6,
+      "kind": "排除",
+      "text": "raw/keep/secret.txt",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 7,
+      "kind": "排除",
+      "text": "staging/",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 8,
+      "kind": "排除",
+      "text": "staging/",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 9,
+      "kind": "否定",
+      "text": "!staging/keep.txt",
+      "net_rows": 0,
+      "gained_rows": 0,
+      "lost_rows": 0,
+      "partitions": {},
+      "changed_leaves": [],
+      "match_calls": 136,
+      "match_pairs": 136
+    },
+    {
+      "line_no": 10,
+      "kind": "排除",
+      "text": "*.log",
+      "net_rows": 4000,
+      "gained_rows": 4000,
+      "lost_rows": 0,
+      "partitions": {
+        "main": {
+          "gained": 4000,
+          "lost": 0
+        }
+      },
+      "changed_leaves": [
+        {
+          "path": "main/debug.log",
+          "rows": 4000,
+          "before_ingested": false,
+          "after_ingested": true,
+          "before_rule_line": 10,
+          "after_rule_line": null
+        }
+      ],
+      "match_calls": 136,
+      "match_pairs": 136
+    }
+  ]
+}

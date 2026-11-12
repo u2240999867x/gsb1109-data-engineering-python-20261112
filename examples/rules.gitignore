@@ -1,0 +1,10 @@
+# 采集排除规则(gitignore 语义, 匹配即不进仓)
+logs/
+*.tmp
+raw/
+!raw/keep/
+raw/keep/secret.txt
+staging/
+staging/
+!staging/keep.txt
+*.log
