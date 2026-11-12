@@ -795,3 +795,26 @@ def explain_unicode(text: str) -> None:
                 name=unicodedata.name(char, "<unknown>"),
             )
         )
+
+
+from ftfy.batch import CleaningPreview, RowPreview, VerifiedRow, preview_cleaning
+
+__all__ = [
+    "CleaningPreview",
+    "ExplainedText",
+    "ExplanationStep",
+    "RowPreview",
+    "TextFixerConfig",
+    "VerifiedRow",
+    "apply_plan",
+    "explain_unicode",
+    "fix_and_explain",
+    "fix_encoding",
+    "fix_encoding_and_explain",
+    "fix_file",
+    "fix_text",
+    "fix_text_segment",
+    "ftfy",
+    "guess_bytes",
+    "preview_cleaning",
+]

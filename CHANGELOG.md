@@ -1,3 +1,11 @@
+## Unreleased
+
+- Added `ftfy.preview_cleaning`, which previews a consistent batch cleaning of a column of text:
+  given human-verified (original, target) pairs, rows to keep unchanged, and unverified rows,
+  it finds the compatible sets of ftfy fix plans that cover the most verified rows with the
+  fewest plans, and flags unverified rows that different optimal classifications would clean
+  differently, showing all of their possible results.
+
 ## Version 6.3.1 (October 25, 2024)
 
 - Fixed `license` metadata field in pyproject.toml.

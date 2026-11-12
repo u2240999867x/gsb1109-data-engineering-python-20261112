@@ -75,3 +75,17 @@ A different kind of explanation you might need is simply a breakdown of what Uni
 A command-line utility that provides similar information, and even more detail, is lunasorcery's `utf8info`_.
 
 .. _`utf8info`: https://github.com/lunasorcery/utf8info
+Previewing a batch cleaning
+---------------------------
+
+When you clean a whole column of text (such as old product names) that mixes
+clean text with one or more chains of mis-decoding, you may want to know
+which rows can be cleaned together before committing to it.
+:func:`ftfy.preview_cleaning` takes a few human-verified (original, target)
+pairs, rows that must be kept as they are, and the remaining unverified rows,
+and finds the compatible sets of fix plans -- re-appliable with
+:func:`ftfy.apply_plan` -- that cover the most verified rows with the fewest
+plans. Rows that different optimal classifications would clean differently
+are flagged for review instead of being guessed at.
+
+.. autofunction:: ftfy.preview_cleaning
