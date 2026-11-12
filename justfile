@@ -1,0 +1,151 @@
+#
+# This justfile is used to manage development and distribution.
+#
+
+# Display available recipes.
+help:
+	@just --list
+
+# Run all benchmarks.
+[group('Development')]
+bench-all: _bench_all
+
+# Run .match_file() benchmarks.
+[group('Development')]
+bench-match-file: _bench_match_file
+
+# Run .match_files() benchmarks.
+[group('Development')]
+bench-match-files: _bench_match_files
+
+# Run GitIgnoreSpec benchmarks.
+[group('Development')]
+bench-gitignore: _bench_gitignore
+
+# Run PathSpec benchmarks.
+[group('Development')]
+bench-pathspec: _bench_pathspec
+
+# Run type checking with mypy.
+[group('Development')]
+check-mypy: _check_mypy
+
+# Run type checking with pyright.
+[group('Development')]
+check-pyright: _check_pyright
+
+# Run tests using the CPython virtual environment.
+[group('Development')]
+test: _test_primary
+
+# Run tests using Tox for all virtual environments.
+[group('Development')]
+test-all: _test_all
+
+# Run tests using Tox for just documentation.
+[group('Development')]
+test-docs: _test_docs
+
+# Run tests using the CPython virtual environment, and fail on first error.
+[group('Development')]
+test-ff: _test_primary_ff
+
+# Create the CPython venv.
+[group('Development')]
+venv-cpy-create: _venv_cpy_create
+
+# Update the CPython venv.
+[group('Development')]
+venv-cpy-update: _venv_cpy_update
+
+# Create the PyPy venv.
+[group('Development')]
+venv-pypy-create: _venv_pypy_create
+
+# Update the PyPy venv.
+[group('Development')]
+venv-pypy-update: _venv_pypy_update
+
+# Build the package.
+[group('Distribution')]
+build-dist: _dist_build
+
+# Build Sphinx documentation.
+[group('Distribution')]
+build-docs: _build_docs
+
+# Generate files used by distribution.
+[group('Distribution')]
+prebuild: _dist_prebuild
+
+
+################################################################################
+# Development
+################################################################################
+
+cpy_bin := env('cpy_bin', 'python3')
+cpy_run := 'dev/venv.sh dev/venv-cpy'
+pypy_bin := env('pypy_bin', 'pypy3')
+pypy_run := 'dev/venv.sh dev/venv-pypy'
+
+_bench_all:
+	{{cpy_run}} pytest -q -c benchmarks/pytest.ini
+
+_bench_gitignore:
+	{{cpy_run}} pytest -q -c benchmarks/pytest.ini benchmarks/bench_gitignore_*_to_*.py
+
+_bench_match_file:
+	{{cpy_run}} pytest -q -c benchmarks/pytest.ini benchmarks/bench_*_match_file_*.py
+
+_bench_match_files:
+	{{cpy_run}} pytest -q -c benchmarks/pytest.ini --benchmark-autosave benchmarks/bench_*_match_files_*.py
+
+_bench_pathspec:
+	{{cpy_run}} pytest -q -c benchmarks/pytest.ini benchmarks/bench_pathspec_*_to_*.py
+
+_build_docs:
+	{{cpy_run}} sphinx-build -aWEnqb html doc/source doc/build
+
+_check_mypy:
+	{{cpy_run}} mypy pathspec tests/check_usage.py
+
+_check_pyright:
+	{{cpy_run}} pyright pathspec tests/check_usage.py
+
+_test_all:
+	{{cpy_run}} tox
+
+_test_docs:
+	{{cpy_run}} tox -e docs
+
+_test_primary:
+	{{cpy_run}} python -m unittest -v
+
+_test_primary_ff:
+	{{cpy_run}} python -m unittest -f -v
+
+_venv_cpy_create:
+	{{cpy_bin}} -m venv --clear dev/venv-cpy
+
+_venv_cpy_update:
+	{{cpy_run}} pip install -r doc/requirements.txt --uploaded-prior-to "$(date -d '30 days ago' '+%Y-%m-%d')" --upgrade build google-re2 google-re2-stubs hyperscan mypy packaging pip pyright pytest pytest-benchmark setuptools tomli tox twine typing-extensions wheel
+	{{cpy_run}} pip install -e .
+
+_venv_pypy_create:
+	{{pypy_bin}} -m venv --clear dev/venv-pypy
+
+_venv_pypy_update:
+	{{pypy_run}} pip install --uploaded-prior-to "$(date -d '30 days ago' '+%Y-%m-%d')" --upgrade hyperscan pip pytest pytest-benchmark setuptools wheel
+	{{pypy_run}} pip install -e .
+
+
+################################################################################
+# Distribution
+################################################################################
+
+_dist_build: _dist_prebuild
+	if [ -d ./dist ]; then find ./dist -type f -delete; fi
+	{{cpy_run}} python -m build
+
+_dist_prebuild:
+	{{cpy_run}} python prebuild.py

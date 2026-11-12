@@ -1,0 +1,588 @@
+"""
+This module provides common classes for the gitignore patterns.
+"""
+from __future__ import annotations
+
+import re
+from typing import (
+	Literal,
+	Optional,  # Replaced by `X | None` in 3.10.
+	Union)  # Replaced by `X | Y` in 3.10.
+
+from pathspec.pattern import (
+	RegexPattern)
+from pathspec._typing import (
+	AnyStr)  # Removed in 3.18.
+
+_BRACKET_TOKEN_REGEX = re.compile((
+	# Range, including escaped endpoints, but not the start of a POSIX class.
+	r'(\\.|[^\\])-(?!\[:)(\\.|[^\\])'
+	# Escaped character.
+	r'|\\(.)'
+	# POSIX class.
+	r'|\[:(\^?)([^:\]]*):\]'
+	# Literal characters reserved for future regex set operations.
+	r'|([-&\[|~])'
+), re.DOTALL)
+"""
+Matches tokens inside a bracket expression:
+
+- A character range (groups 1 and 2).
+
+- A backslash escaped character (group 3).
+
+-	Matches a POSIX bracket character class token such as ``[:alpha:]`` inside a
+	bracket expression. Group 4 captures a leading caret (unsupported by git);
+	group 5 captures the class name.
+
+- A literal character requiring regex escaping (group 6).
+"""
+
+_BYTES_ENCODING = 'latin1'
+"""
+The encoding to use when parsing a byte string pattern.
+"""
+
+_POSIX_CLASS_TO_REGEX: dict[str, str] = {
+	# Git handles POSIX bracket character classes as ASCII only. Python's `re` has
+	# Unicode-aware meta-characters (e.g., ``\w``, ``\d``, ``\s``).
+	'alnum': '0-9A-Za-z',
+	'alpha': 'A-Za-z',
+	'blank': '\\t ',
+	'cntrl': '\\x00-\\x1f\\x7f',
+	'digit': '0-9',
+	'graph': '\\x21-\\x2e\\x30-\\x7e',
+	'lower': 'a-z',
+	'print': '\\x20-\\x2e\\x30-\\x7e',
+	'punct': '!-.:-@\\[-`{-~',
+	'space': '\\t\\n\\r ',
+	'upper': 'A-Z',
+	'xdigit': '0-9A-Fa-f',
+}
+"""
+Maps each POSIX bracket character class name to ASCII regex ranges, excluding
+the path separator.
+"""
+
+_STAR_3P = re.compile(r'\*\*\*+')
+"""
+Matches three or more asterisks.
+"""
+
+
+def _collapse_star_runs(segments: list[str]) -> list[str]:
+	"""
+	Replace each pattern segment that consists only of three or more asterisks
+	(e.g., ``***``) with a double-asterisk (``**``). Git treats a run of multiple
+	asterisks as a double-asterisk when it spans a whole path segment.
+
+	*segments* (:class:`list` of :class:`str`) are the pattern segments.
+
+	Returns the modified segments (:class:`list` of :class:`str`).
+	"""
+	return [_STAR_3P.sub('**', seg) for seg in segments]
+
+
+def _has_ending_escape(pattern: str) -> bool:
+	"""
+	Determine whether there is an unpaired backslash ending the segment.
+
+	*pattern* (:class:`str`) is the pattern segment.
+
+	Returns whether there is an ending escape (:class:`bool`).
+	"""
+	return (len(pattern) - len(pattern.rstrip('\\'))) % 2 == 1
+
+
+def _split_pattern(pattern: str) -> list[str]:
+	"""
+	Split the pattern by path separator (i.e., ``/``). A slash appearing in a
+	bracket expression will not be split on.
+
+	*pattern* (:class:`str`) is the whole pattern.
+
+	Returns the segments (:class:`list` of :class:`str`).
+	"""
+	# TODO: This may be a good location to consume backslash escapes, or at least
+	# escaped slashes.
+
+	if '[' not in pattern or '/' not in pattern:
+		return pattern.split('/')
+
+	segments: list[str] = []
+	start = i = 0
+	while i < len(pattern):
+		if pattern[i] == '\\' and i + 1 < len(pattern) and pattern[i + 1] != '/':
+			i += 2
+			continue
+
+		if pattern[i] == '[':
+			j = i + 1
+			if j < len(pattern) and pattern[j] in '!^':
+				j += 1
+
+			if j < len(pattern) and pattern[j] == ']':
+				j += 1
+
+			while j < len(pattern) and pattern[j] != ']':
+				if pattern[j] == '\\':
+					j += 2
+				elif pattern[j:j+2] == '[:':
+					close = pattern.find(':]', j + 2)
+					if close == -1:
+						j = len(pattern)
+						break
+					j = close + 2
+				else:
+					j += 1
+
+			if j < len(pattern):
+				i = j + 1
+				continue
+
+		if pattern[i] == '/':
+			segments.append(pattern[start:i])
+			start = i + 1
+
+		i += 1
+
+	segments.append(pattern[start:])
+
+	# Git's raw slash check anchors even slashes inside bracket expressions.
+	if '/' in segments[0] and (
+		len(segments) == 1 or (len(segments) == 2 and not segments[-1])
+	):
+		segments.insert(0, '')
+
+	return segments
+
+
+def _strip_ending_escape(pattern: str) -> str:
+	"""
+	Strips the last unpaired backslash from a segment if there is one.
+
+	*pattern* (:class:`str`) is the pattern segment.
+
+	Returns the modified pattern (:class:`str`).
+	"""
+	if _has_ending_escape(pattern):
+		return pattern[:-1]
+	else:
+		return pattern
+
+
+def _strip_trailing_ws(pattern: str) -> str:
+	"""
+	Remove one line ending, then strip unescaped trailing spaces. Other
+	whitespace is part of the filename.
+
+	*pattern* (:class:`str`) is the pattern.
+
+	Returns the modified pattern (:class:`str`).
+	"""
+	# Git removes the LF and one terminal CR before trimming spaces. A CR before
+	# those spaces belongs to the filename, even when it is escaped.
+	pattern = pattern.removesuffix('\n').removesuffix('\r')
+
+	i = len(pattern) - 1
+	if i == -1 or pattern[i] != ' ':
+		# Fast path: pattern does not end with a space.
+		return pattern
+
+	# Scan past spaces.
+	i -= 1
+	while i >= 0 and pattern[i] == ' ':
+		i -= 1
+
+	last_ws = i + 1
+
+	# Count backslashes.
+	while i >= 0 and pattern[i] == '\\':
+		i -= 1
+
+	bs_count = last_ws - i - 1
+	if bs_count % 2 == 1:
+		# Odd count, first whitespace character is escaped, strip the rest.
+		last_ws += 1
+
+	# Strip trailing whitespace.
+	return pattern[:last_ws]
+
+
+def _sub_bracket_token(match: re.Match[str]) -> str:
+	"""
+	Translate a single token matched by :data:`_BRACKET_TOKEN_REGEX`. A token can
+	be a range (groups 1 and 2), a backslash escaped character (group 3), or a
+	POSIX bracket character class (groups 4 and 5), or a literal regex set
+	operator character (group 6).
+
+	*match* (:class:`re.Match`) is the match object.
+
+	Returns the replacement string (:class:`str`).
+	"""
+	range_start, range_end, escape_char, class_negated, class_name, literal_char = match.groups()
+
+	# Character range. A bracket expression cannot match a path separator (slash).
+	if range_start is not None:
+		assert range_end is not None, match
+		range_start, range_end = range_start[-1], range_end[-1]
+		if range_start == '/' and range_end == '/':
+			return ''
+		elif range_start == '/':
+			range_start = '0'
+		elif range_end == '/':
+			range_end = '.'
+
+		if range_start < '/' < range_end:
+			# Split range around slash.
+			return re.escape(range_start) + '-.0-' + re.escape(range_end)
+		else:
+			return re.escape(range_start) + '-' + re.escape(range_end)
+
+	if escape_char:
+		# Backslash escaped character.
+		return re.escape(escape_char)
+	elif literal_char:
+		# Reserved character.
+		return re.escape(literal_char)
+
+	# POSIX bracket character class.
+	class_regex = _POSIX_CLASS_TO_REGEX.get(class_name)
+	if class_regex is not None and not class_negated:
+		return class_regex
+
+	raise _PosixClassError((
+		f"Invalid character class={match.group(0)!r} found in pattern="
+		f"{match.string!r}."
+	))  # _PosixClassError
+
+
+class _GitIgnoreBasePattern(RegexPattern):
+	"""
+	.. warning:: This class is not part of the public API. It is subject to
+		change.
+
+	The :class:`_GitIgnoreBasePattern` class is the base implementation for a
+	compiled gitignore pattern.
+	"""
+
+	# Keep the dict-less class hierarchy.
+	__slots__ = ()
+
+	def __init__(
+		self,
+		pattern: Union[AnyStr, re.Pattern, None],
+		include: Optional[bool] = None,
+		*,
+		errors: Optional[Literal['literal', 'null', 'raise']] = None,
+	) -> None:
+		"""
+		Initializes the :class:`_GitIgnoreBasePattern` instance.
+
+		*pattern* (:class:`str`, :class:`bytes`, :class:`re.Pattern`, or
+		:data:`None`) is the pattern to compile into a regular expression.
+
+		*include* (:class:`bool` or :data:`None`) must be :data:`None` unless
+		*pattern* is a precompiled regular expression (:class:`re.Pattern`) in which
+		case it is whether matched files should be included (:data:`True`), excluded
+		(:data:`False`), or is a null operation (:data:`None`).
+
+		*errors* (:class:`str` :data:`None`) is how to handle invalid notation in
+		the pattern. Default is :data:`None` for ``'null'`` because that is the
+		behavior of Git.
+
+		-	``'literal'``: Most invalid notation will be treated as a literal string.
+			In cases where the gitignore documentation clearly states the pattern
+			should never match, a null-operation will be returned.
+
+		-	``'null'``: Invalid notation will result in a null-operation.
+
+		-	``'raise'``: Invalid notation will raise a :exc:`GitIgnorePatternError`.
+		"""
+		super().__init__(pattern, include, errors=errors)
+
+	@staticmethod
+	def escape(s: AnyStr) -> AnyStr:
+		"""
+		Escape special characters in the given string.
+
+		*s* (:class:`str` or :class:`bytes`) a filename or a string that you want to
+		escape, usually before adding it to a ".gitignore".
+
+		Returns the escaped string (:class:`str` or :class:`bytes`).
+		"""
+		if isinstance(s, str):
+			return_type = str
+			string = s
+		elif isinstance(s, bytes):
+			return_type = bytes
+			string = s.decode(_BYTES_ENCODING)
+		else:
+			raise TypeError(f"s:{s!r} is not a unicode or byte string.")
+
+		# Reference: https://git-scm.com/docs/gitignore#_pattern_format
+		out_string = ''.join((f"\\{x}" if x in '\\[]!*#?' else x) for x in string)
+
+		# EDGE CASE: Git strips trailing spaces from a pattern unless they are
+		# escaped with a backslash. Escape them so an escaped filename that ends
+		# with a space still matches that file.
+		stripped = out_string.rstrip(' ')
+		trailing = len(out_string) - len(stripped)
+		if trailing:
+			out_string = stripped + '\\ ' * trailing
+
+		if return_type is bytes:
+			out_bytes = out_string.encode(_BYTES_ENCODING)
+			return out_bytes  # type: ignore[return-value]
+		else:
+			return out_string  # type: ignore[return-value]
+
+	@staticmethod
+	def _translate_segment_glob(
+		pattern: str,
+		errors: Literal['literal', 'raise'],
+	) -> str:
+		"""
+		Translates the glob pattern to a regular expression. This is used in the
+		constructor to translate a path segment glob pattern to its corresponding
+		regular expression.
+
+		*pattern* (:class:`str`) is the glob pattern.
+
+		*errors* (:class:`str`) is how to handle invalid pattern notation in the
+		pattern:
+
+		-	``'literal'``: Invalid notation will be treated as a literal string.
+
+		-	``'raise'``: Invalid notation will raise an exception.
+
+		Raises :exc:`._PosixClassError` when an invalid POXIS class is found and
+		*errors* is ``'raise'``.
+
+		Raises :exc:`._RangeNotationError` when an invalid range notation is found
+		and *errors* is ``'raise'``.
+
+		Raises :exc:`._TrailingBackslashError` when a trailing backslash is found at
+		the end of the pattern, regardless of the value of *errors*.
+
+		Returns the regular expression (:class:`str`).
+		"""
+		# NOTE: This is derived from `fnmatch.translate()` and is similar to the
+		# POSIX function `fnmatch()` with the `FNM_PATHNAME` flag set.
+
+		escape = False
+		regex = ''
+		i, end = 0, len(pattern)
+		while i < end:
+			# Get next character.
+			char = pattern[i]
+			i += 1
+
+			if escape:
+				# Escape the character.
+				escape = False
+				regex += re.escape(char)
+
+			elif char == '\\':
+				# Escape character, escape next character.
+				escape = True
+
+			elif char == '*':
+				# Multi-character wildcard. Match any string (except slashes), including
+				# an empty string.
+				while i < end and pattern[i] == '*':
+					i += 1
+				regex += '[^/]*'
+
+			elif char == '*':
+				# Multi-character wildcard. Match any string (except slashes), including
+				# an empty string. Consecutive asterisks within a segment are equivalent
+				# to one. Collapse them.
+				while i < end and pattern[i] == '*':
+					i += 1
+
+				regex += '[^/]*'
+
+			elif char == '?':
+				# Single-character wildcard. Match any single character (except a
+				# slash).
+				regex += '[^/]'
+
+			elif char == '[':
+				# Bracket expression (range notation) wildcard. Except for the beginning
+				# exclamation mark, the whole bracket expression can be used directly as
+				# regex, but we have to find where the expression ends.
+				# - "[][!]" matches ']', '[' and '!'.
+				# - "[]-]" matches ']' and '-'.
+				# - "[!]a-]" matches any character except ']', 'a' and '-'.
+				bracket_start = i - 1
+				j = i
+
+				# Pass bracket expression negation.
+				if j < end and (pattern[j] == '!' or pattern[j] == '^'):
+					j += 1
+
+				# Pass first closing bracket if it is at the beginning of the
+				# expression.
+				if j < end and pattern[j] == ']':
+					j += 1
+
+				# Find closing bracket. Stop once we reach the end or find it.
+				while j < end and pattern[j] != ']':
+					if pattern[j] == '\\':
+						# Skip over an escaped character so an escaped closing bracket
+						# ("\]") does not end the bracket expression.
+						j += 2
+					elif pattern[j:j+2] == '[:':
+						# Skip over a POSIX character class token ("[:name:]") so its
+						# internal closing bracket is not mistaken for the end of the whole
+						# bracket expression.
+						close = pattern.find(':]', j + 2)
+						if close == -1:
+							j = end
+							break
+						j = close + 2
+					else:
+						j += 1
+
+				if j < end:
+					# Found end of bracket expression. Increment j to be one past the
+					# closing bracket:
+					#
+					#  [...]
+					#   ^   ^
+					#   i   j
+					#
+					j += 1
+					expr = '['
+					is_expr_negated = False
+
+					if pattern[i] == '!':
+						# Bracket expression needs to be negated.
+						expr += '^'
+						is_expr_negated = True
+						i += 1
+					elif pattern[i] == '^':
+						# POSIX declares that the regex bracket expression negation "[^...]"
+						# is undefined in a glob pattern. Python's `fnmatch.translate()`
+						# escapes the caret ('^') as a literal. Git supports the using a
+						# caret for negation. Maintain consistency with Git because that is
+						# the expected behavior.
+						expr += '^'
+						is_expr_negated = True
+						i += 1
+
+					# Build regex bracket expression.
+					#
+					# A backslash escapes the next character (e.g. "[\]]" matches "]"),
+					# the same as the outside of a bracket expression.
+					#
+					# Translate POSIX character classes (e.g. "[:alpha:]") into their
+					# ASCII regex equivalents. Git supports these, but Python's `re` does
+					# not, so passing them through verbatim builds a broken regex that
+					# silently mismatches (and warns about a nested set).
+					try:
+						body = _BRACKET_TOKEN_REGEX.sub(_sub_bracket_token, pattern[i:j - 1])
+					except _PosixClassError:
+						if errors == 'raise':
+							# EDGE CASE: Git discards patterns with an invalid range notation
+							# or an invalid POSIX class.
+							raise
+						else:
+							# Treat the whole bracket expression as a literal.
+							regex += re.escape(pattern[bracket_start:j])
+							i = j
+							continue
+
+					if is_expr_negated:
+						# Negated expressions must also exclude the path separator. Preserve
+						# literal ']' and '-' when inserting '/' ahead of them.
+						if body.startswith((']', '-')):
+							body = '\\' + body
+						expr += '/'
+
+					if not is_expr_negated:
+						body = body.replace('/', '')
+						if body.startswith('^'):
+							body = '\\' + body
+						if not body:
+							raise _NeverMatchError()
+
+					expr += body + ']'
+
+					if errors == 'raise':
+						try:
+							re.compile(expr)
+						except re.error as e:  # Renamed to `re.PatternError` in 3.13.
+							raise _RangeNotationError((
+								f"Invalid range notation={pattern[i:j]!r} found in "
+								f"pattern={pattern!r}."
+							)) from e
+
+					# Add regex bracket expression to regex result.
+					regex += expr
+
+					# Set i to one past the closing bracket.
+					i = j
+
+				else:
+					# Failed to find closing bracket.
+					if errors == 'raise':
+						# Treat invalid range notation as an error.
+						raise _RangeNotationError((
+							f"Invalid range notation={pattern[i:j]!r} found in {pattern=!r}."
+						))
+					else:
+						# Treat opening bracket as a bracket literal instead of as an
+						# expression.
+						regex += '\\['
+
+			else:
+				# Regular character, escape it for regex.
+				regex += re.escape(char)
+
+		if escape:
+			# Trailing backslash found. According to the gitignore docs, this "is an
+			# invalid pattern that never matches".
+			raise _TrailingBackslashError()
+
+		return regex
+
+
+class GitIgnorePatternError(ValueError):
+	"""
+	The :class:`GitIgnorePatternError` class indicates an invalid gitignore
+	pattern.
+	"""
+	pass
+
+
+class _NeverMatchError(GitIgnorePatternError):
+	"""
+	Raised internally when a bracket expression contains only the path separator
+	(slash).
+	"""
+
+
+class _PosixClassError(GitIgnorePatternError):
+	"""
+	Raised internally when a bracket expression contains an unknown or negated
+	POSIX character class name. Git treats such a pattern as malformed.
+	"""
+	pass
+
+
+class _RangeNotationError(GitIgnorePatternError):
+	"""
+	Raised internally when an invalid range notation was found in a gitignore
+	pattern.
+	"""
+	pass
+
+
+class _TrailingBackslashError(GitIgnorePatternError):
+	"""
+	Raised internally when a trailing backslash is found at the end of a gitignore
+	pattern.
+	"""
+	pass

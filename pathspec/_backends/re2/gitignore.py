@@ -1,0 +1,239 @@
+"""
+This module provides the :module:`re2` backend for :class:`~pathspec.gitignore.GitIgnoreSpec`.
+
+WARNING: The *pathspec._backends.re2* package is not part of the public API. Its
+contents and structure are likely to change.
+"""
+from __future__ import annotations
+
+from typing import (
+	Callable,  # Replaced by `collections.abc.Callable` in 3.9.2.
+	Optional,  # Replaced by `X | None` in 3.10.
+	Union)  # Replaced by `X | Y` in 3.10.
+
+try:
+	import re2
+except ModuleNotFoundError:
+	re2 = None  # type: ignore[assignment]
+
+from pathspec.pattern import (
+	RegexPattern)
+from pathspec.patterns.gitignore.spec import (
+	GitIgnoreSpecPattern,
+	_BYTES_ENCODING,
+	_DIR_MARK_CG,
+	_DIR_MARK_OPT)
+from pathspec._typing import (
+	override)  # Added in 3.12.
+
+from .._utils import (
+	is_native_compatible,
+	translate_end_anchor,
+	translate_regex_flags)
+
+from ._base import (
+	Re2RegexDat,
+	Re2RegexDebug)
+from .pathspec import (
+	Re2PsBackend)
+
+
+class Re2GiBackend(Re2PsBackend):
+	"""
+	The :class:`Re2GiBackend` class is the :module:`re2` implementation used by
+	:class:`~pathspec.gitignore.GitIgnoreSpec` for matching files.
+	"""
+
+	@override
+	@staticmethod
+	def _init_set(
+		debug: bool,
+		patterns: dict[int, RegexPattern],
+		regex_set: re2.Set,  # type: ignore
+		sort_indices: Optional[Callable[[list[int]], None]],
+	) -> list[Re2RegexDat]:
+		"""
+		Create the re2 regex set.
+
+		*debug* (:class:`bool`) is whether to include additional debugging
+		information for the regular expressions.
+
+		*patterns* (:class:`dict`) maps pattern index (:class:`int`) to pattern
+		(:class:`.RegexPattern`).
+
+		*regex_set* (:class:`re2.Set`) is the regex set.
+
+		*sort_indices* (:class:`callable` or :data:`None`) is a function used to
+		sort the patterns by index. This is used during testing to ensure the order
+		of patterns is not accidentally relied on.
+
+		Returns a :class:`list` indexed by regex id (:class:`int`) to its data
+		(:class:`Re2RegexDat`).
+		"""
+		# Sort patterns.
+		indices = list(patterns.keys())
+		if sort_indices is not None:
+			sort_indices(indices)
+
+		# Prepare patterns.
+		regex_data: list[Re2RegexDat] = []
+		for pattern_index in indices:
+			pattern = patterns[pattern_index]
+			pattern_include = pattern.include
+			if pattern_include is None:
+				continue
+
+			if not is_native_compatible(pattern):
+				raise ValueError((
+					f"patterns[{pattern_index}]={pattern!r} is not compatible with the "
+					f"re2 backend. Use the simple backend instead."
+				))
+
+			assert isinstance(pattern, RegexPattern), (pattern_index, pattern)
+			re_pattern = pattern.regex
+			assert re_pattern is not None, (pattern_index, pattern)
+			regex = re_pattern.pattern
+
+			use_regexes: list[tuple[Union[str, bytes], bool]] = []
+			if isinstance(pattern, GitIgnoreSpecPattern):
+				# GitIgnoreSpecPattern uses capture groups for its directory marker. Re2
+				# supports capture groups, but they cannot be utilized when using
+				# `re2.Set`. Handle this scenario.
+				regex_str: str
+				if isinstance(regex, str):
+					regex_str = regex
+				else:
+					assert isinstance(regex, bytes), regex
+					regex_str = regex.decode(_BYTES_ENCODING)
+
+				if _DIR_MARK_CG in regex_str:
+					# Found directory marker.
+					if regex_str.endswith(_DIR_MARK_OPT):
+						# Regex has optional directory marker. Split regex into directory
+						# and file variants. The directory variant must require a child
+						# segment: without one the query *is* that directory, which is a
+						# direct match and not an excluded ancestor.
+						base_regex = regex_str[:-len(_DIR_MARK_OPT)]
+						use_regexes.append((f'{base_regex}/(?s:.)', True))
+						use_regexes.append((rf'{base_regex}/?\z', False))
+					else:
+						# Remove capture group.
+						base_regex = regex_str.replace(_DIR_MARK_CG, '/')
+						use_regexes.append((f'{base_regex}(?s:.)', True))
+						use_regexes.append((rf'{base_regex}\z', False))
+
+			if not use_regexes:
+				# No special case for regex.
+				use_regexes.append((regex, False))
+
+			for regex, is_dir_pattern in use_regexes:
+				regex = translate_end_anchor(regex)
+				regex = translate_regex_flags(regex, re_pattern.flags)
+				if debug:
+					regex_data.append(Re2RegexDebug(
+						include=pattern_include,
+						index=pattern_index,
+						is_dir_pattern=is_dir_pattern,
+						regex=regex,
+					))
+				else:
+					regex_data.append(Re2RegexDat(
+						include=pattern_include,
+						index=pattern_index,
+						is_dir_pattern=is_dir_pattern,
+					))
+
+				regex_set.Add(regex)  # type: ignore[type-var]
+
+		# Compile patterns.
+		regex_set.Compile()
+		return regex_data
+
+	@override
+	def match_file(self, file: str) -> tuple[Optional[bool], Optional[int]]:
+		"""
+		Check the file against the patterns.
+
+		*file* (:class:`str`) is the normalized file path to check.
+
+		Returns a :class:`tuple` containing whether to include *file* (:class:`bool`
+		or :data:`None`), and the index of the last matched pattern (:class:`int` or
+		:data:`None`).
+		"""
+		return self._match(file, check_ancestors=True)
+
+	def _match(
+		self, file: str, check_ancestors: bool,
+	) -> tuple[Optional[bool], Optional[int]]:
+		"""
+		Implements :meth:`match_file`. *check_ancestors* (:class:`bool`) is
+		whether to ask if an ancestor directory of *file* is excluded; see
+		:meth:`_match_ancestor` for why it can be skipped.
+		"""
+		# Find best match.
+		match_ids: Optional[list[int]] = self._set.Match(file)  # type: ignore[assignment]
+		if not match_ids:
+			return (None, None)
+
+		# Resolve the ancestor directory and the file separately: a file negation
+		# only applies while no ancestor directory is excluded.
+		dir_include: Optional[bool] = None
+		dir_index: int = -1
+		file_include: Optional[bool] = None
+		file_index: int = -1
+
+		regex_data = self._regex_data
+		for regex_id in match_ids:
+			regex_dat = regex_data[regex_id]
+
+			# WARNING: According to the documentation on `RE2::Set::Match()`, there is
+			# no guarantee matches will be produced in order!
+			include = regex_dat.include
+			index = regex_dat.index
+			if regex_dat.is_dir_pattern:
+				# Pattern matched by a directory pattern.
+				if index > dir_index:
+					dir_include = include
+					dir_index = index
+			elif index > file_index:
+				# Pattern matched by a file pattern.
+				file_include = include
+				file_index = index
+
+		assert dir_index != -1 or file_index != -1, (dir_index, file_index)
+		if check_ancestors and (dir_include is not None or file_include is not None):
+			# Neither file nor directory negations override an excluded ancestor.
+			# Some patterns (e.g. "a/**") match without a directory marker.
+			ancestor_index = self._match_ancestor(file)
+			if ancestor_index is not None:
+				return (True, ancestor_index)
+
+		if file_include is not None:
+			return (file_include, file_index)
+		elif dir_include:
+			# An ancestor matched an exclude pattern, but the spec as a whole
+			# re-includes that ancestor, so the rule does not apply.
+			return (None, None)
+		else:
+			return (dir_include, dir_index)
+
+	def _match_ancestor(self, file: str) -> Optional[int]:
+		"""
+		Return the excluding pattern index for a strict ancestor, or :data:`None`.
+		Git stops descending at the first excluded directory, so the ancestors are
+		asked outermost first, each as a directory query (trailing slash included).
+		By the time an ancestor is asked, every ancestor above it is known not to
+		be excluded, so it is matched without checking its own ancestors again;
+		otherwise each level re-asks all the levels above it and the work grows
+		exponentially with depth.
+		"""
+		index = file.find('/')
+		while index != -1 and index + 1 < len(file):
+			ancestor_include, ancestor_index = self._match(
+				file[:index + 1], check_ancestors=False,
+			)
+			if ancestor_include:
+				return ancestor_index
+			index = file.find('/', index + 1)
+
+		return None

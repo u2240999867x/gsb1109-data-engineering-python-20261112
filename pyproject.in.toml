@@ -1,0 +1,77 @@
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = ["flit_core >=3.2,<5"]
+
+[project]
+authors = [
+	{name = "Caleb P. Burns", email = "cpburnz@gmail.com"},
+]
+classifiers = [
+	"Development Status :: 5 - Production/Stable",
+	"Intended Audience :: Developers",
+	"License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+	"Operating System :: OS Independent",
+	"Programming Language :: Python",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.9",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+	"Programming Language :: Python :: 3.14",
+	"Programming Language :: Python :: Implementation :: CPython",
+	"Programming Language :: Python :: Implementation :: PyPy",
+	"Topic :: Software Development :: Libraries :: Python Modules",
+	"Topic :: Utilities",
+]
+description = "Utility library for gitignore style pattern matching of file paths."
+# TODO: Once fully relicensed, use:
+#license = {text = "MIT OR MPL-2.0"}
+license = {text = "MPL 2.0"}
+name = "pathspec"
+readme = "README-dist.rst"
+requires-python = ">=3.9"
+version = "__VERSION__"
+
+[project.optional-dependencies]
+hyperscan = [
+	"hyperscan >=0.7",
+]
+optional = [
+	"typing-extensions >=4",
+]
+re2 = [
+	"google-re2 >=1.1",
+]
+
+[dependency-groups]
+dev = [
+	"pytest >=8",
+	"pytest-benchmark >=5",
+	"tomli; python_version<'3.11'",
+	"typing-extensions >=4.4",
+]
+
+[project.urls]
+"Change Log" = "https://python-path-specification.readthedocs.io/en/latest/changes.html"
+"Documentation" = "https://python-path-specification.readthedocs.io/en/latest/index.html"
+"Issue Tracker" = "https://github.com/cpburnz/python-pathspec/issues"
+"Source Code" = "https://github.com/cpburnz/python-pathspec"
+
+[tool.flit.sdist]
+include = [
+	"*.cfg",
+	"*.in",
+	"*.ini",
+	"*.md",
+	"*.py",
+	"*.rst",
+	"*.toml",
+	"LICENSE-*",
+	"benchmarks/",
+	"doc/",
+	"tests/",
+]
+exclude = [
+	"doc/build/",
+]

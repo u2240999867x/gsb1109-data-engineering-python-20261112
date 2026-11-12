@@ -1,0 +1,312 @@
+"""
+This module provides the :module:`hyperscan` backend for :class:`~pathspec.gitignore.GitIgnoreSpec`.
+
+WARNING: The *pathspec._backends.hyperscan* package is not part of the public
+API. Its contents and structure are likely to change.
+"""
+from __future__ import annotations
+
+from collections.abc import (
+	Sequence)
+from typing import (
+	Any,
+	Callable,  # Replaced by `collections.abc.Callable` in 3.9.2.
+	Optional,  # Replaced by `X | None` in 3.10.
+	Union)  # Replaced by `X | Y` in 3.10.
+
+try:
+	import hyperscan
+except ModuleNotFoundError:
+	hyperscan = None  # type: ignore[assignment]
+
+from pathspec.pattern import (
+	RegexPattern)
+from pathspec.patterns.gitignore.spec import (
+	GitIgnoreSpecPattern,
+	_BYTES_ENCODING,
+	_DIR_MARK_CG,
+	_DIR_MARK_OPT)
+from pathspec._typing import (
+	override)  # Added in 3.12.
+
+from .._utils import (
+	is_native_compatible,
+	translate_end_anchor,
+	translate_regex_flags)
+
+from ._base import (
+	HS_FLAGS,
+	HS_VERSION,
+	HS_VERSION_0_9_1,
+	HyperscanExprDat,
+	HyperscanExprDebug,
+	compat_convert_utf8)
+from .pathspec import (
+	HyperscanPsBackend)
+
+
+class HyperscanGiBackend(HyperscanPsBackend):
+	"""
+	The :class:`HyperscanGiBackend` class is the :module:`hyperscan`
+	implementation used by :class:`~pathspec.gitignore.GitIgnoreSpec`. The
+	Hyperscan database uses block mode for matching files.
+	"""
+
+	# Change type hint.
+	_out: tuple[Optional[bool], int, Optional[bool], int]  # type: ignore[assignment]
+
+	def __init__(
+		self,
+		patterns: Sequence[RegexPattern],
+		*,
+		_debug_exprs: Optional[bool] = None,
+		_test_sort: Optional[Callable[[list], None]] = None,
+	) -> None:
+		"""
+		Initialize the :class:`HyperscanMatcher` instance.
+
+		*patterns* (:class:`Sequence` of :class:`.RegexPattern`) contains the
+		compiled patterns.
+		"""
+		super().__init__(patterns, _debug_exprs=_debug_exprs, _test_sort=_test_sort)
+
+		self._out = (None, -1, None, -1)
+		"""
+		*_out* (:class:`tuple`) stores the current match:
+
+		-	*0* (:class:`bool` or :data:`None`) is the directory match include.
+
+		-	*1* (:class:`int`) is the directory match index.
+
+		-	*2* (:class:`bool` or :data:`None`) is the file match include.
+
+		-	*3* (:class:`int`) is the file match index.
+		"""
+
+	@override
+	@staticmethod
+	def _init_db(
+		db: hyperscan.Database,  # type: ignore
+		debug: bool,
+		patterns: list[tuple[int, RegexPattern]],
+		sort_ids: Optional[Callable[[list[int]], None]],
+	) -> list[HyperscanExprDat]:
+		"""
+		Create the Hyperscan database from the given patterns.
+
+		*db* (:class:`hyperscan.Hyperscan`) is the Hyperscan database.
+
+		*debug* (:class:`bool`) is whether to include additional debugging
+		information for the expressions.
+
+		*patterns* (:class:`~collections.abc.Sequence` of :class:`.RegexPattern`)
+		contains the patterns.
+
+		*sort_ids* (:class:`callable` or :data:`None`) is a function used to sort
+		the compiled expression ids. This is used during testing to ensure the order
+		of expressions is not accidentally relied on.
+
+		Returns a :class:`list` indexed by expression id (:class:`int`) to its data
+		(:class:`HyperscanExprDat`).
+		"""
+		# WARNING: Hyperscan raises a `hyperscan.error` exception when compiled with
+		# zero elements.
+		assert patterns, patterns
+
+		# Prepare patterns.
+		expr_data: list[HyperscanExprDat] = []
+		exprs: list[bytes] = []
+		for pattern_index, pattern in patterns:
+			if not is_native_compatible(pattern):
+				raise ValueError((
+					f"patterns[{pattern_index}]={pattern!r} is not compatible with the "
+					f"hyperscan backend. Use the simple backend instead."
+				))
+
+			pattern_include = pattern.include
+			assert pattern_include is not None, (pattern_index, pattern)
+			assert isinstance(pattern, RegexPattern), (pattern_index, pattern)
+			re_pattern = pattern.regex
+			assert re_pattern is not None, (pattern_index, pattern)
+			regex = re_pattern.pattern
+
+			use_regexes: list[tuple[Union[str, bytes], bool]] = []
+			if isinstance(pattern, GitIgnoreSpecPattern):
+				# GitIgnoreSpecPattern uses capture groups for its directory marker but
+				# Hyperscan does not support capture groups. Handle this scenario.
+				regex_str: str
+				if isinstance(regex, str):
+					regex_str = regex
+				else:
+					assert isinstance(regex, bytes), regex
+					regex_str = regex.decode(_BYTES_ENCODING)
+
+				if _DIR_MARK_CG in regex_str:
+					# Found directory marker.
+					if regex_str.endswith(_DIR_MARK_OPT):
+						# Regex has optional directory marker. Split regex into directory
+						# and file variants. The directory variant must require a child
+						# segment: without one the query *is* that directory, which is a
+						# direct match and not an excluded ancestor.
+						base_regex = regex_str[:-len(_DIR_MARK_OPT)]
+						use_regexes.append((f'{base_regex}/(?s:.)', True))
+						use_regexes.append((rf'{base_regex}/?\z', False))
+					else:
+						# Remove capture group.
+						base_regex = regex_str.replace(_DIR_MARK_CG, '/')
+						use_regexes.append((f'{base_regex}(?s:.)', True))
+						use_regexes.append((rf'{base_regex}\z', False))
+
+			if not use_regexes:
+				# No special case for regex.
+				use_regexes.append((regex, False))
+
+			for regex, is_dir_pattern in use_regexes:
+				regex = translate_end_anchor(regex)
+				regex = translate_regex_flags(regex, re_pattern.flags)
+				if isinstance(regex, bytes):
+					regex_bytes = regex
+				else:
+					assert isinstance(regex, str), regex
+					if HS_VERSION >= HS_VERSION_0_9_1:
+						regex_bytes = regex.encode('utf8')
+					else:
+						# Convert unicode for older version of hyperscan.
+						regex_bytes = compat_convert_utf8(regex)
+
+				if debug:
+					expr_data.append(HyperscanExprDebug(
+						include=pattern_include,
+						index=pattern_index,
+						is_dir_pattern=is_dir_pattern,
+						regex=regex,
+					))
+				else:
+					expr_data.append(HyperscanExprDat(
+						include=pattern_include,
+						index=pattern_index,
+						is_dir_pattern=is_dir_pattern,
+					))
+
+				exprs.append(regex_bytes)
+
+		# Sort expressions.
+		ids = list(range(len(exprs)))
+		if sort_ids is not None:
+			sort_ids(ids)
+			exprs = [exprs[__id] for __id in ids]
+
+		# Compile patterns.
+		db.compile(
+			expressions=exprs,
+			ids=ids,
+			elements=len(exprs),
+			flags=HS_FLAGS,
+		)
+		return expr_data
+
+	@override
+	def match_file(self, file: str) -> tuple[Optional[bool], Optional[int]]:
+		"""
+		Check the file against the patterns.
+
+		*file* (:class:`str`) is the normalized file path to check.
+
+		Returns a :class:`tuple` containing whether to include *file* (:class:`bool`
+		or :data:`None`), and the index of the last matched pattern (:class:`int` or
+		:data:`None`).
+		"""
+		return self._match(file, check_ancestors=True)
+
+	def _match(
+		self, file: str, check_ancestors: bool,
+	) -> tuple[Optional[bool], Optional[int]]:
+		"""
+		Implements :meth:`match_file`. *check_ancestors* (:class:`bool`) is
+		whether to ask if an ancestor directory of *file* is excluded; see
+		:meth:`_match_ancestor` for why it can be skipped.
+		"""
+		# NOTICE: According to benchmarking, a method callback is 13% faster than
+		# using a closure here.
+		db = self._db
+		if db is None:
+			# Database was not initialized because there were no patterns. Return no
+			# match.
+			return (None, None)
+
+		self._out = (None, -1, None, -1)
+		db.scan(file.encode('utf8'), match_event_handler=self.__on_match)
+
+		dir_include, dir_index, file_include, file_index = self._out
+		if check_ancestors and (dir_include is not None or file_include is not None):
+			# Neither file nor directory negations override an excluded ancestor.
+			# Some patterns (e.g. "a/**") match without a directory marker.
+			ancestor_index = self._match_ancestor(file)
+			if ancestor_index is not None:
+				return (True, ancestor_index)
+
+		if file_include is not None:
+			out_include, out_index = file_include, file_index
+		elif dir_include:
+			# An ancestor matched an exclude pattern, but the spec as a whole
+			# re-includes that ancestor, so the rule does not apply.
+			out_include, out_index = None, -1
+		else:
+			out_include, out_index = dir_include, dir_index
+
+		return (out_include, out_index if out_index != -1 else None)
+
+	def _match_ancestor(self, file: str) -> Optional[int]:
+		"""
+		Return the excluding pattern index for a strict ancestor, or :data:`None`.
+		Git stops descending at the first excluded directory, so the ancestors are
+		asked outermost first, each as a directory query (trailing slash included).
+		By the time an ancestor is asked, every ancestor above it is known not to
+		be excluded, so it is matched without checking its own ancestors again;
+		otherwise each level re-asks all the levels above it and the work grows
+		exponentially with depth.
+		"""
+		index = file.find('/')
+		while index != -1 and index + 1 < len(file):
+			ancestor_include, ancestor_index = self._match(
+				file[:index + 1], check_ancestors=False,
+			)
+			if ancestor_include:
+				return ancestor_index
+			index = file.find('/', index + 1)
+
+		return None
+
+
+	@override
+	def __on_match(
+		self,
+		expr_id: int,
+		_from: int,
+		_to: int,
+		_flags: int,
+		_context: Any,
+	) -> Optional[bool]:
+		"""
+		Called on each match.
+
+		*expr_id* (:class:`int`) is the expression id (index) of the matched
+		pattern.
+		"""
+		expr_dat = self._expr_data[expr_id]
+
+		# WARNING: Hyperscan does not guarantee matches will be produced in order!
+		# Resolve the ancestor directory and the file separately: a file negation
+		# only applies while no ancestor directory is excluded.
+		include = expr_dat.include
+		index = expr_dat.index
+		dir_include, dir_index, file_include, file_index = self._out
+		if expr_dat.is_dir_pattern:
+			# Pattern matched by a directory pattern.
+			if index > dir_index:
+				self._out = (include, index, file_include, file_index)  # type: ignore
+		elif index > file_index:
+			# Pattern matched by a file pattern.
+			self._out = (dir_include, dir_index, include, index)  # type: ignore
+
+		return None

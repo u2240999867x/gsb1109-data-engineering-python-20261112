@@ -1,0 +1,230 @@
+
+1.2.0 (TBD)
+-----------
+
+Major changes:
+
+- TODO `Issue #116`_: Change license from MPL-2.0 to dual MIT and MPL-2.0.
+
+API changes:
+
+- Deprecated: `pathspec.util.RecursionError` is now an alias for `pathspec.util.RecursivePathError`. Python has had a built-in named `RecursionError` since 3.4. A `from pathspec import *` or `from pathspec.util import *` will no longer shadow Python's built-in `RecursionError`.
+- `TreeEntry.stat` will no longer be the `os.stat_result` of the linked node when using `iter_tree_entries(follow_links=False)`.
+- Patterns no longer match file names with a trailing newline unless the pattern explicitly matches it.
+- Fixed many obscure edge cases to more closely match Git's behavior. Most were in `GitIgnoreSpec` / `GitIgnoreSpecPattern`, and some in `GitIgnoreBasicPattern`. Results may change subtly.
+
+
+New features:
+
+- `Issue #126`_: `.iter_tree_files()` / `.iter_tree_entries()` methods now have a *subdir* parameter to allow traversing only part of the tree.
+- `GitIgnoreBasicPattern` and `GitIgnoreSpecPattern` now accept an `errors` argument to `__init__()` and `pattern_to_regex()` to control how invalid patterns are handled.
+
+Bug fixes:
+
+- Hyperscan backend no longer fails on multibyte UTF-8 characters.
+- `Pull #123`_: Ignore invalid gitignore bracket ranges for `GitIgnoreSpec`.
+- `Pull #128`_: Support POSIX character classes (e.g. `[[:alpha:]]`) in gitignore bracket expressions.
+- `Issue #129`_ / `Pull #132`_: Fix GitIgnoreSpec re-including files under an excluded directory
+- `Pull #133`_: Capture the directory marker in the `*/**` regex shortcut so `!*/` can re-include directories.
+- `Issue #134`_: GitIgnoreSpec: reverse and forward evaluation disagree.
+- `Pull #135`_: Escape trailing spaces in `GitIgnoreSpecPattern.escape()`.
+- `Issue #137`_ / `Pull #138`_: Patterns ending in `/**` no longer match their bare parent directory, preserving traversal to re-included children.
+- `Issue #137`_ / `Pull #144`_: The excluded directory rule no longer applies to an ancestor directory which the spec itself re-includes.
+- `Pull #139`_: Match newline characters in paths with `*` and `**`.
+- `Pull #142`_ / `Pull #150`_ / `Pull #181`_: Fix trailing-space trimming after escaped backslashes.
+- `Issue #146`_: pattern_to_regex raises on three lines git accepts (bare '!', '! ', lone '\').
+- `Pull #147`_: Match directory entries with directory-only patterns. `PathSpec.match_entries()` and `.match_tree_entries()` will now match directory entries as directory paths (i.e., with a trailing `/`), instead of as file paths (no trailing `/`).
+- `Pull #149`_: Handle directory-open errors through on_error during tree walks.
+- `Pull #151`_: Preserve externally compiled regex flags during backend selection.
+- `Pull #152`_: Anchor gitignore filename matches at the actual end of the path.
+- `Pull #156`_: Avoid following symbolic link targets when checking file types in `iter_tree_files(follow_links=False)` / `iter_tree_entries(follow_links=False)`.
+- `Pull #157`_: Handle backslash escapes in gitignore bracket expressions.
+- `Pull #158`_: Ignore unmatched exclusions in `detailed_match_files()`.
+- `Pull #159`_: Preserve PathSpec state when backend reconstruction fails.
+- `Pull #160`_: Handle entry inspection errors when walking files.
+- `Issue #161`_ / `Pull #162`_: Preserve custom patterns during automatic backend selection.
+- `Pull #163`_: Keep gitignore bracket expressions within path segments.
+- `Pull #164`_: Keep direct files included for directory-only terminal globstar patterns such as ``d/**/``.
+- `Pull #165`_: Directory negations no longer re-include descendants of an excluded ancestor.
+- `Pull #166`_: Escape literal regex set operators in gitignore bracket expressions so valid patterns compile when FutureWarning is treated as an error.
+- `Pull #167`_: - A gitignore pattern segment made of three or more asterisks (e.g., `***/x`) is now treated as a double-asterisk, matching Git.
+- `Pull #170`_: Match escaped internal path separators in gitignore patterns without treating them as trailing backslashes.
+- `Pull #171`_: An explicit `**/*/**` pattern no longer matches top-level directories, so a negation can re-include files below them.
+- `Pull #173`_: Strip repeated './' prefixes before matching paths.
+- `Pull #174`_: Tree walks now honor `on_error` for errors reading an open directory scan, preserving yielded entries and continuing with sibling directories.
+- `Pull #175`_: Preserve foreign compiled regex options when selecting a backend.
+- `Issue #176`_: Normalize redundant interior separators and current-directory components in matching paths, preserving original paths in matching results.
+- `Issue #177`_: Preserve slashes inside gitignore bracket expressions while excluding path separators from their matches.
+- `Pull #180`_: - Treat a negated root-only gitignore pattern (``!/``) as a no-op instead of re-including directories.
+
+
+.. _`Issue #116`: https://github.com/cpburnz/python-pathspec/issues/116
+.. _`Pull #123`: https://github.com/cpburnz/python-pathspec/pull/123
+.. _`Issue #126`: https://github.com/cpburnz/python-pathspec/issues/126
+.. _`Pull #128`: https://github.com/cpburnz/python-pathspec/pull/128
+.. _`Issue #129`: https://github.com/cpburnz/python-pathspec/issues/129
+.. _`Pull #132`: https://github.com/cpburnz/python-pathspec/pull/132
+.. _`Pull #133`: https://github.com/cpburnz/python-pathspec/pull/133
+.. _`Issue #134`: https://github.com/cpburnz/python-pathspec/issues/134
+.. _`Pull #135`: https://github.com/cpburnz/python-pathspec/pull/135
+.. _`Issue #137`: https://github.com/cpburnz/python-pathspec/issues/137
+.. _`Pull #138`: https://github.com/cpburnz/python-pathspec/pull/138
+.. _`Pull #139`: https://github.com/cpburnz/python-pathspec/pull/139
+.. _`Pull #142`: https://github.com/cpburnz/python-pathspec/pull/142
+.. _`Pull #144`: https://github.com/cpburnz/python-pathspec/pull/144
+.. _`Issue #146`: https://github.com/cpburnz/python-pathspec/issues/146
+.. _`Pull #147`: https://github.com/cpburnz/python-pathspec/pull/147
+.. _`Pull #149`: https://github.com/cpburnz/python-pathspec/pull/149
+.. _`Pull #150`: https://github.com/cpburnz/python-pathspec/pull/150
+.. _`Pull #151`: https://github.com/cpburnz/python-pathspec/pull/151
+.. _`Pull #152`: https://github.com/cpburnz/python-pathspec/pull/152
+.. _`Pull #156`: https://github.com/cpburnz/python-pathspec/pull/156
+.. _`Pull #157`: https://github.com/cpburnz/python-pathspec/pull/157
+.. _`Pull #158`: https://github.com/cpburnz/python-pathspec/pull/158
+.. _`Pull #159`: https://github.com/cpburnz/python-pathspec/pull/159
+.. _`Pull #160`: https://github.com/cpburnz/python-pathspec/pull/160
+.. _`Issue #161`: https://github.com/cpburnz/python-pathspec/issues/161
+.. _`Pull #162`: https://github.com/cpburnz/python-pathspec/pull/162
+.. _`Pull #163`: https://github.com/cpburnz/python-pathspec/pull/163
+.. _`Pull #164`: https://github.com/cpburnz/python-pathspec/pull/164
+.. _`Pull #165`: https://github.com/cpburnz/python-pathspec/pull/165
+.. _`Pull #166`: https://github.com/cpburnz/python-pathspec/pull/166
+.. _`Pull #167`: https://github.com/cpburnz/python-pathspec/pull/167
+.. _`Pull #170`: https://github.com/cpburnz/python-pathspec/pull/170
+.. _`Pull #171`: https://github.com/cpburnz/python-pathspec/pull/171
+.. _`Pull #173`: https://github.com/cpburnz/python-pathspec/pull/173
+.. _`Pull #174`: https://github.com/cpburnz/python-pathspec/pull/174
+.. _`Pull #175`: https://github.com/cpburnz/python-pathspec/pull/175
+.. _`Issue #176`: https://github.com/cpburnz/python-pathspec/issues/176
+.. _`Issue #177`: https://github.com/cpburnz/python-pathspec/issues/177
+.. _`Pull #180`: https://github.com/cpburnz/python-pathspec/pull/180
+.. _`Pull #181`: https://github.com/cpburnz/python-pathspec/pull/181
+
+
+1.1.1 (2026-04-26)
+------------------
+
+Improvements:
+
+- Improved type checking with mypy and pyright.
+
+Bug fixes:
+
+- Fixed typing on `PathSpec[TPattern]` to `PathSpec[TPattern_co]`.
+- Added missing variant type-hint `type[Pattern]` to `PathSpec.from_lines()` parameter `pattern_factory`.
+- Fixed possible type error when using `+` and `+=` operators on `PathSpec`.
+
+
+1.1.0 (2026-04-22)
+------------------
+
+New features:
+
+- `Issue #108`_: Specialize pattern type for `PathSpec` as `PathSpec[TPattern]` for better debugging of `PathSpec().patterns`.
+
+Bug fixes:
+
+- `Issue #93`_: Git discards invalid range notation. `GitIgnoreSpecPattern` now discards patterns with invalid range notation like Git.
+- `Pull #106`_: Fix escape() not escaping backslash characters.
+
+Improvements:
+
+- `Pull #110`_: Nicer debug print outs (and str for regex pattern).
+
+
+.. _`Pull #106`: https://github.com/cpburnz/python-pathspec/pull/106
+.. _`Issue #108`: https://github.com/cpburnz/python-pathspec/issues/108
+.. _`Pull #110`: https://github.com/cpburnz/python-pathspec/pull/110
+
+
+1.0.4 (2026-01-26)
+------------------
+
+Bug fixes:
+
+- `Issue #103`_: Using re2 fails if pyre2 is also installed.
+
+.. _`Issue #103`: https://github.com/cpburnz/python-pathspec/issues/103
+
+
+1.0.3 (2026-01-09)
+------------------
+
+Bug fixes:
+
+- `Issue #101`_: pyright strict errors with pathspec >= 1.0.0.
+- `Issue #102`_: No module named 'tomllib'.
+
+
+.. _`Issue #101`: https://github.com/cpburnz/python-pathspec/issues/101
+.. _`Issue #102`: https://github.com/cpburnz/python-pathspec/issues/102
+
+
+1.0.2 (2026-01-07)
+------------------
+
+Bug fixes:
+
+- Type hint `collections.abc.Callable` does not properly replace `typing.Callable` until Python 3.9.2.
+
+
+1.0.1 (2026-01-06)
+------------------
+
+Bug fixes:
+
+- `Issue #100`_: ValueError(f"{patterns=!r} cannot be empty.") when using black.
+
+
+.. _`Issue #100`: https://github.com/cpburnz/python-pathspec/issues/100
+
+
+1.0.0 (2026-01-05)
+------------------
+
+Major changes:
+
+- `Issue #91`_: Dropped support of EoL Python 3.8.
+- Added concept of backends to allow for faster regular expression matching. The backend can be controlled using the `backend` argument to `PathSpec()`, `PathSpec.from_lines()`, `GitIgnoreSpec()`, and `GitIgnoreSpec.from_lines()`.
+- Renamed "gitwildmatch" pattern back to "gitignore". The "gitignore" pattern behaves slightly differently when used with `PathSpec` (*gitignore* as documented) than with `GitIgnoreSpec` (replicates *Git*'s edge cases).
+
+API changes:
+
+- Breaking: protected method `pathspec.pathspec.PathSpec._match_file()` (with a leading underscore) has been removed and replaced by backends. This does not affect normal usage of `PathSpec` or `GitIgnoreSpec`. Only custom subclasses will be affected. If this breaks your usage, let me know by `opening an issue <https://github.com/cpburnz/python-pathspec/issues>`_.
+- Deprecated: "gitwildmatch" is now an alias for "gitignore".
+- Deprecated: `pathspec.patterns.GitWildMatchPattern` is now an alias for `pathspec.patterns.gitignore.spec.GitIgnoreSpecPattern`.
+- Deprecated: `pathspec.patterns.gitwildmatch` module has been replaced by the `pathspec.patterns.gitignore` package.
+- Deprecated: `pathspec.patterns.gitwildmatch.GitWildMatchPattern` is now an alias for `pathspec.patterns.gitignore.spec.GitIgnoreSpecPattern`.
+- Deprecated: `pathspec.patterns.gitwildmatch.GitWildMatchPatternError` is now an alias for `pathspec.patterns.gitignore.GitIgnorePatternError`.
+- Removed: `pathspec.patterns.gitwildmatch.GitIgnorePattern` has been deprecated since v0.4 (2016-07-15).
+- Signature of method `pathspec.pattern.RegexPattern.match_file()` has been changed from `def match_file(self, file: str) -> RegexMatchResult | None` to `def match_file(self, file: AnyStr) -> RegexMatchResult | None` to reflect usage.
+- Signature of class method `pathspec.pattern.RegexPattern.pattern_to_regex()` has been changed from `def pattern_to_regex(cls, pattern: str) -> tuple[str, bool]` to `def pattern_to_regex(cls, pattern: AnyStr) -> tuple[AnyStr | None, bool | None]` to reflect usage and documentation.
+
+New features:
+
+- Added optional "hyperscan" backend using `hyperscan`_ library. It will automatically be used when installed. This dependency can be installed with ``pip install 'pathspec[hyperscan]'``.
+- Added optional "re2" backend using the `google-re2`_ library. It will automatically be used when installed. This dependency can be installed with ``pip install 'pathspec[re2]'``.
+- Added optional dependency on `typing-extensions`_ library to improve some type hints.
+
+Bug fixes:
+
+- `Issue #93`_: Do not remove leading spaces.
+- `Issue #95`_: Matching for files inside folder does not seem to behave like .gitignore's.
+- `Issue #98`_: UnboundLocalError in RegexPattern when initialized with `pattern=None`.
+- Type hint on return value of `pathspec.pattern.RegexPattern.match_file()` to match documentation.
+
+Improvements:
+
+- Mark Python 3.13 and 3.14 as supported.
+- No-op patterns are now filtered out when matching files, slightly improving performance.
+- Fix performance regression in `iter_tree_files()` from v0.10.
+
+
+.. _`Issue #38`: https://github.com/cpburnz/python-pathspec/issues/38
+.. _`Issue #91`: https://github.com/cpburnz/python-pathspec/issues/91
+.. _`Issue #93`: https://github.com/cpburnz/python-pathspec/issues/93
+.. _`Issue #95`: https://github.com/cpburnz/python-pathspec/issues/95
+.. _`Issue #98`: https://github.com/cpburnz/python-pathspec/issues/98
+.. _`google-re2`: https://pypi.org/project/google-re2/
+.. _`hyperscan`: https://pypi.org/project/hyperscan/
+.. _`typing-extensions`: https://pypi.org/project/typing-extensions/
