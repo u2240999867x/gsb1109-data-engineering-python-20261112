@@ -33,6 +33,24 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Migrating append patches to RFC 6902
+------------------------------------
+`patch_migration.py` moves archives built with `JsonPatchWithAppend` onto the
+RFC 6902 `JsonPatch`. Each `append` to an object member or an in-range array
+string element becomes a standard `replace` carrying the full string written
+at that step; `test` order, `move` targets and every other step are kept. An
+`append` to an array itself (the `-` position or an out-of-range index) or to
+a non-string element fails in the old entry point, so those rows are returned
+on the quarantine list instead of being converted.
+
+`migrate_archive()` groups the rows by the standard patch they require and
+emits each patch once. `plan_prechecks()` then chooses the minimum pre-delivery
+`test` operations, using only fields present on every candidate baseline, that
+admit every row of a group and make any other writable baseline fail before its
+first write; baselines the open fields cannot separate are reported as unsafe
+pairs. `deliverable_patch()` prepends those checks, producing a patch the
+standard `JsonPatch` can apply with no extra routing.
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as

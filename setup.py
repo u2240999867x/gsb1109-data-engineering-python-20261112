@@ -11,6 +11,7 @@ PACKAGE = 'jsonpatch'
 MODULES = (
         'jsonpatch',
         'jsonpatch_cli',
+        'patch_migration',
 )
 
 with open('requirements.txt') as f:

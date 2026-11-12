@@ -11,6 +11,7 @@ import unittest
 import jsonpatch
 import jsonpatch_cli
 import jsonpointer
+import patch_migration
 import random
 import shlex
 import sys
@@ -4049,6 +4050,336 @@ class StandardAppendIsolationTests(unittest.TestCase):
                        'value': 'canonical', 'v': 'ignored'}]
         self.assertEqual(jsonpatch.JsonPatch(operations).apply({'message': 'Hello'}),
                          {'message': 'canonical'})
+
+
+# A small archive of records produced with JsonPatchWithAppend, covering
+# object-member appends, appends mixed with test/move operations, and the
+# array-element appends that fail in the old entry point.
+ARCHIVE_BASELINES = {
+    'B1': {
+        'version': 3,
+        'kind': 'order',
+        'state': 'draft',
+        'message': 'Hello',
+        'note': 'note-1',
+        'items': [{'name': 'Alice'}, {'name': 'Bob'}],
+        'meta': {'owner': 'alice', 'region': 'cn'},
+    },
+    'B2': {
+        'version': 3,
+        'kind': 'order',
+        'state': 'active',
+        'message': 'Hello',
+        'note': 'note-1',
+        'items': [{'name': 'Alice'}, {'name': 'Bob'}],
+        'meta': {'owner': 'alice', 'region': 'us'},
+    },
+    'B3': {
+        'version': 7,
+        'kind': 'order',
+        'state': 'draft',
+        'message': 'Greetings',
+        'note': 'note-2',
+        'items': [{'name': 'Mallory'}],
+        'meta': {'owner': 'mallory', 'region': 'cn'},
+    },
+    'B4': {
+        'version': 3,
+        'kind': 'order',
+        'state': 'draft',
+        'message': 'Hello',
+        'note': 'note-1',
+        'items': [{'name': 'Alice'}, {'name': 'Bob'}],
+        'meta': {'owner': 'alice', 'region': 'eu'},
+    },
+}
+
+# Fields the receiver is allowed to read in pre-delivery test operations;
+# every one exists on every candidate baseline above. The precheck tests use
+# smaller, self-contained baselines of their own.
+
+ARCHIVE_ROWS = [
+    # A simple object-member append, recorded against B1 and B2. The same
+    # standard replace is required on both, so they form one group.
+    {'id': 'R1', 'baseline': 'B1', 'operations': [
+        {'op': 'test', 'path': '/message', 'value': 'Hello'},
+        {'op': 'append', 'path': '/message', 'value': ' World'},
+    ]},
+    {'id': 'R2', 'baseline': 'B2', 'operations': [
+        {'op': 'test', 'path': '/message', 'value': 'Hello'},
+        {'op': 'append', 'path': '/message', 'value': ' World'},
+    ]},
+    # A second replace content, hence a second group, recorded against B4.
+    {'id': 'R3', 'baseline': 'B4', 'operations': [
+        {'op': 'append', 'path': '/note', 'value': '!done'},
+    ]},
+    # An append interleaved with a move: the moved member's actual target and
+    # the value written at each step have to survive migration unchanged.
+    {'id': 'R4', 'baseline': 'B1', 'operations': [
+        {'op': 'test', 'path': '/meta/owner', 'value': 'alice'},
+        {'op': 'move', 'from': '/meta/owner', 'path': '/meta/lead'},
+        {'op': 'append', 'path': '/message', 'value': '!'},
+        {'op': 'test', 'path': '/meta/lead', 'value': 'alice'},
+    ]},
+    # Appends to an array itself or to a non-string array element fail in the
+    # old entry point and are quarantined rather than migrated.
+    {'id': 'R5', 'baseline': 'B1', 'operations': [
+        {'op': 'append', 'path': '/items/0', 'value': ' X'},
+    ]},
+    {'id': 'R6', 'baseline': 'B2', 'operations': [
+        {'op': 'test', 'path': '/message', 'value': 'Hello'},
+        {'op': 'append', 'path': '/items/-', 'value': ' Y'},
+    ]},
+]
+
+
+class AppendMigrationTests(unittest.TestCase):
+
+    def test_append_becomes_full_value_replace(self):
+        migrated = patch_migration.migrate_patch(
+            [{'op': 'append', 'path': '/message', 'value': ' World'}],
+            {'message': 'Hello'})
+        self.assertEqual(migrated, [
+            {'op': 'replace', 'path': '/message', 'value': 'Hello World'},
+        ])
+        self.assertEqual(
+            jsonpatch.apply_patch({'message': 'Hello'}, migrated),
+            {'message': 'Hello World'})
+
+    def test_test_order_move_target_and_step_values_are_preserved(self):
+        baseline = copy.deepcopy(ARCHIVE_BASELINES['B1'])
+        migrated = patch_migration.migrate_patch(
+            ARCHIVE_ROWS[3]['operations'], baseline)
+        self.assertEqual([op['op'] for op in migrated],
+                         ['test', 'move', 'replace', 'test'])
+        move = migrated[1]
+        self.assertEqual(move, {'op': 'move', 'from': '/meta/owner',
+                                'path': '/meta/lead'})
+        # The replace carries the whole string written by the append.
+        self.assertEqual(migrated[2],
+                         {'op': 'replace', 'path': '/message',
+                          'value': 'Hello!'})
+        # The final test still resolves, proving the move really wrote to
+        # /meta/lead, and the document matches the old entry point.
+        result = jsonpatch.apply_patch(copy.deepcopy(baseline), migrated)
+        old_result = jsonpatch.JsonPatchWithAppend(
+            copy.deepcopy(ARCHIVE_ROWS[3]['operations'])).apply(
+            copy.deepcopy(baseline))
+        self.assertEqual(result, old_result)
+        self.assertEqual(result['meta'], {'region': 'cn', 'lead': 'alice'})
+
+    def test_second_append_sees_the_value_written_by_the_first(self):
+        migrated = patch_migration.migrate_patch(
+            [{'op': 'append', 'path': '/m', 'value': 'a'},
+             {'op': 'append', 'path': '/m', 'value': 'b'}],
+            {'m': ''})
+        self.assertEqual(migrated, [
+            {'op': 'replace', 'path': '/m', 'value': 'a'},
+            {'op': 'replace', 'path': '/m', 'value': 'ab'},
+        ])
+
+    def test_standard_operations_pass_through_verbatim(self):
+        operations = [
+            {'op': 'test', 'path': '/a', 'value': 1},
+            {'op': 'move', 'from': '/a', 'path': '/b'},
+            {'op': 'copy', 'from': '/b', 'path': '/c'},
+            {'op': 'remove', 'path': '/c'},
+        ]
+        migrated = patch_migration.migrate_patch(
+            operations, {'a': 1})
+        self.assertEqual(migrated, operations)
+        self.assertIsNot(migrated, operations)
+
+    def test_array_append_is_quarantined(self):
+        # An append to an array itself or to a non-string element fails in the
+        # old entry point, while a standard replace/add would succeed.
+        for doc, path in (
+                ({'items': [{'name': 'Alice'}]}, '/items/0'),
+                ({'items': ['Alice']}, '/items/-'),
+                ({'items': ['Alice']}, '/items/9')):
+            with self.subTest(path=path):
+                with self.assertRaises(patch_migration.QuarantinedRow) as raised:
+                    patch_migration.migrate_patch(
+                        [{'op': 'append', 'path': path, 'value': ' X'}], doc)
+                self.assertEqual(raised.exception.path, path)
+                self.assertEqual(raised.exception.index, 0)
+                with self.assertRaises(jsonpatch.JsonPatchException):
+                    jsonpatch.JsonPatchWithAppend([
+                        {'op': 'append', 'path': path, 'value': ' X'},
+                    ]).apply(copy.deepcopy(doc))
+        # An in-range string element is a normal, migratable append.
+        migrated = patch_migration.migrate_patch(
+            [{'op': 'append', 'path': '/items/0', 'value': ' X'}],
+            {'items': ['Alice']})
+        self.assertEqual(migrated, [
+            {'op': 'replace', 'path': '/items/0', 'value': 'Alice X'},
+        ])
+
+    def test_non_string_append_is_a_migration_error(self):
+        with self.assertRaises(patch_migration.MigrationError):
+            patch_migration.migrate_patch(
+                [{'op': 'append', 'path': '/m', 'value': 1}],
+                {'m': 'Hello'})
+
+    def test_archive_collects_errors_without_stopping(self):
+        rows = [
+            {'id': 'E1', 'baseline': 'B', 'operations': [
+                {'op': 'remove', 'path': '/missing'}]},
+            {'id': 'E2', 'baseline': 'NOPE', 'operations': []},
+        ]
+        report = patch_migration.migrate_archive(rows, {'B': {'a': 1}})
+        self.assertEqual(report.groups, ())
+        self.assertEqual(report.quarantined, ())
+        self.assertEqual([row_id for row_id, _ in report.errors],
+                         ['E1', 'E2'])
+
+    def test_archive_groups_and_quarantine_list(self):
+        report = patch_migration.migrate_archive(
+            ARCHIVE_ROWS, ARCHIVE_BASELINES)
+        self.assertEqual([entry.row_id for entry in report.quarantined],
+                         ['R5', 'R6'])
+        for entry in report.quarantined:
+            self.assertIn('/items/', entry.path)
+            self.assertEqual(entry.reason,
+                             'Appending to an array fails in the '
+                             'old entry point')
+        self.assertEqual(report.errors, ())
+
+        by_rows = {group.row_ids: group for group in report.groups}
+        # R1 and R2 require the same replacement, so they share one group and
+        # only one standard patch is produced.
+        self.assertEqual(len(report.groups), 3)
+        group_12 = next(group for group in report.groups
+                        if group.row_ids == ('R1', 'R2'))
+        self.assertEqual(group_12.patch, (
+            {'op': 'test', 'path': '/message', 'value': 'Hello'},
+            {'op': 'replace', 'path': '/message', 'value': 'Hello World'},
+        ))
+        self.assertEqual(group_12.baseline_ids, ('B1', 'B2'))
+        group_3 = next(group for group in report.groups
+                       if group.row_ids == ('R3',))
+        self.assertEqual(group_3.patch, (
+            {'op': 'replace', 'path': '/note', 'value': 'note-1!done'},
+        ))
+        group_4 = next(group for group in report.groups
+                       if group.row_ids == ('R4',))
+        self.assertTrue(any(op['op'] == 'move' for op in group_4.patch))
+
+        # Every delivered group is a valid RFC 6902 patch and writes exactly
+        # what the original JsonPatchWithAppend row wrote.
+        for group in report.groups:
+            for row_id in group.row_ids:
+                row = next(row for row in ARCHIVE_ROWS
+                           if row['id'] == row_id)
+                baseline = copy.deepcopy(ARCHIVE_BASELINES[row['baseline']])
+                expected = jsonpatch.JsonPatchWithAppend(
+                    copy.deepcopy(row['operations'])).apply(
+                    copy.deepcopy(baseline))
+                self.assertEqual(
+                    jsonpatch.apply_patch(baseline, list(group.patch)),
+                    expected)
+
+
+class AppendPrecheckPlanningTests(unittest.TestCase):
+
+    def setUp(self):
+        # A group of two rows that both turn /m 'old' into 'old!'. Candidate
+        # baselines:
+        # - T1, T2: the baselines the rows were recorded against
+        # - W_write: a wrong baseline that still accepts the replace
+        # - W_nosub: a wrong baseline without /m, so the first write fails
+        # - W_twin: a wrong baseline identical to T1/T2 on the open fields
+        self.baselines = {
+            'T1': {'a': 1, 'b': 1, 'm': 'old'},
+            'T2': {'a': 1, 'b': 1, 'm': 'old'},
+            'W_write': {'a': 2, 'b': 1, 'm': 'old'},
+            'W_nosub': {'a': 1, 'b': 1},
+            'W_twin': {'a': 1, 'b': 1, 'm': 'old'},
+        }
+        rows = [
+            {'id': 'G1', 'baseline': 'T1', 'operations': [
+                {'op': 'append', 'path': '/m', 'value': '!'}]},
+            {'id': 'G2', 'baseline': 'T2', 'operations': [
+                {'op': 'append', 'path': '/m', 'value': '!'}]},
+        ]
+        report = patch_migration.migrate_archive(rows, self.baselines)
+        self.assertEqual(len(report.groups), 1)
+        self.group = report.groups[0]
+        self.allowed = ('/a', '/b')
+
+    def test_minimum_checks_admit_group_and_block_writers(self):
+        plan = patch_migration.plan_prechecks(
+            self.group, self.baselines, self.allowed)
+        # /a separates W_write from the T1/T2 group; /b does not, so a single
+        # test is the minimum cover.
+        self.assertEqual(plan.checks, (
+            {'op': 'test', 'path': '/a', 'value': 1},
+        ))
+        self.assertEqual(plan.baseline_ids, ('T1', 'T2'))
+        # W_nosub already rejects the replace before any write.
+        self.assertEqual(plan.blocked_before_first_write, ('W_nosub',))
+        # W_twin cannot be told apart on the open columns, so it is reported.
+        self.assertEqual(plan.unsafe_pairs,
+                         (('T1', 'W_twin'), ('T2', 'W_twin')))
+
+        delivered = patch_migration.deliverable_patch(self.group, plan)
+        # True baselines pass, with every check ahead of the write.
+        self.assertEqual([op['op'] for op in delivered],
+                         ['test', 'replace'])
+        for baseline_id in ('T1', 'T2'):
+            self.assertEqual(
+                jsonpatch.apply_patch(
+                    copy.deepcopy(self.baselines[baseline_id]), delivered),
+                {'a': 1, 'b': 1, 'm': 'old!'})
+        # The distinguishable wrong baseline fails on the test, untouched.
+        wrong = copy.deepcopy(self.baselines['W_write'])
+        with self.assertRaises(jsonpatch.JsonPatchTestFailed):
+            jsonpatch.apply_patch(wrong, delivered)
+        self.assertEqual(wrong, self.baselines['W_write'])
+
+    def test_no_check_needed_when_first_write_fails(self):
+        plan = patch_migration.plan_prechecks(
+            self.group, self.baselines, self.allowed)
+        self.assertIn('W_nosub', plan.blocked_before_first_write)
+        # Without any precheck the standard patch already fails at its only
+        # (and first) write on that baseline.
+        with self.assertRaises(jsonpatch.JsonPatchException):
+            jsonpatch.apply_patch(
+                copy.deepcopy(self.baselines['W_nosub']),
+                list(self.group.patch))
+
+    def test_indistinguishable_writers_are_unsafe_pairs(self):
+        # With only /b open, every candidate holds the same value there, so no
+        # writer can be blocked and the two wrong writers are reported.
+        plan = patch_migration.plan_prechecks(
+            self.group, self.baselines, ('/b',))
+        self.assertEqual(plan.checks, ())
+        self.assertEqual(
+            set(plan.unsafe_pairs),
+            {('T1', 'W_write'), ('T2', 'W_write'),
+             ('T1', 'W_twin'), ('T2', 'W_twin')})
+
+    def test_field_missing_on_a_candidate_is_not_used(self):
+        baselines = copy.deepcopy(self.baselines)
+        del baselines['W_nosub']['a']
+        plan = patch_migration.plan_prechecks(
+            self.group, baselines, self.allowed)
+        # /a is absent on one candidate, so it cannot be read as a precheck;
+        # /b is identical everywhere, leaving W_write unguarded.
+        self.assertTrue(all(check['path'] != '/a' for check in plan.checks))
+        self.assertEqual(plan.checks, ())
+        self.assertIn(('T1', 'W_write'), plan.unsafe_pairs)
+
+    def test_receiver_runs_only_standard_operations(self):
+        plan = patch_migration.plan_prechecks(
+            self.group, self.baselines, self.allowed)
+        delivered = patch_migration.deliverable_patch(self.group, plan)
+        for operation in delivered:
+            self.assertIn(operation['op'],
+                          ('add', 'remove', 'replace', 'move', 'copy',
+                           'test'))
+        # The standard, RFC-only class accepts the whole delivery.
+        jsonpatch.JsonPatch(copy.deepcopy(delivered))
 
 
 def load_tests(loader, tests, pattern):

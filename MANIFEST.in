@@ -13,3 +13,4 @@ include pytest.ini
 include ext_tests.py
 include typetests/usage.py
 include tests.js
+include patch_migration.py
