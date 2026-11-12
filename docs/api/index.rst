@@ -8,6 +8,39 @@ Top-level Functions
 
 .. autofunction:: chardet.detect_all
 
+.. autofunction:: chardet.detect_consensus
+
+Multi-Sample Consensus Types
+----------------------------
+
+.. autoclass:: chardet.ConsensusResult
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.ConsensusStatus
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.ConsensusConflict
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.SampleReport
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.SampleVerdict
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.EncodingSupport
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.EncodingRejection
+   :members:
+   :undoc-members:
+
 UniversalDetector
 -----------------
 

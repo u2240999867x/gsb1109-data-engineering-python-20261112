@@ -55,6 +55,40 @@ candidates. With ``prefer_superset=True`` two candidates can map to one
 name (ISO-8859-7 and Windows-1253 both become Windows-1253); only the
 higher-confidence one is listed.
 
+Multi-Sample Consensus
+----------------------
+
+When one supplier sends a dozen small files that should share an encoding,
+guessing each file separately and picking the highest average score hides
+the disagreements. :func:`chardet.detect_consensus` instead evaluates
+whether the independent samples admit one common encoding and reports the
+conflicts when they do not:
+
+.. code-block:: python
+
+   result = chardet.detect_consensus([file_a, file_b, file_c])
+   if result.status is chardet.ConsensusStatus.AGREEMENT:
+       encoding = result.common_encodings[0]
+   elif result.status is chardet.ConsensusStatus.CONFLICT:
+       for conflict in result.conflicts:
+           print(conflict.reason)
+   else:  # NO_EVIDENCE (all empty) or INCONCLUSIVE (too little text)
+       ...
+
+Every sample is analyzed on its own bytes — they are never concatenated, so
+no multi-byte sequence or bigram statistic can span a file boundary.
+Identical contents count once: passing the same bytes many times cannot
+outvote a single sample with a structural contradiction (a BOM, an escape
+sequence, or multi-byte UTF-8 validation). Empty samples carry no weight,
+and BOM samples get their own ``"bom"`` verdict.
+
+Each :class:`~chardet.SampleReport` keeps the full audit trail: the
+encodings the sample positively supported above the confidence threshold,
+every candidate codec that decodes it, and the codecs whose strict
+validation rejects it. The same candidate filters as :func:`chardet.detect`
+(``include_encodings``, ``exclude_encodings``, ``encoding_era``) apply.
+Call :meth:`~chardet.ConsensusResult.to_dict` for a JSON-friendly view.
+
 Streaming Detection
 -------------------
 

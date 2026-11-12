@@ -130,6 +130,12 @@ The language-detection strategy in `pipeline/language.py`: (1) single-language e
 **CJK gating**:
 The filter applied between byte-validity and structural probing that drops CJK candidates lacking genuine multi-byte structure. Prevents false CJK matches on single-byte data.
 
+**Multi-sample consensus** (`consensus.py`, `chardet.detect_consensus`):
+The independent entry point for "do these separate byte samples admit one common encoding?" Each distinct sample runs the full pipeline on its own bytes — samples are never concatenated, so no statistic spans a file boundary — and identical contents count once (one `SampleReport` with an `occurrences` count), so duplicated copies cannot outvote another sample's structural contradiction. Three evidence layers decide, hardest first: decode facts (`decodes_without_error` per candidate, a hard rejection), structural commitments (BOM, escape, BOM-less UTF-16/32, markup declarations, multi-byte UTF-8 — a commitment another sample cannot decode is a `CONFLICT`; pure ASCII is deliberately not a commitment since it contradicts no ASCII-superset codec), and positive support (the per-sample ranking above `MINIMUM_THRESHOLD`). Outcomes are `AGREEMENT`, `CONFLICT`, `INCONCLUSIVE` (nothing contradicts but nothing is positively endorsed), and `NO_EVIDENCE` (all samples empty). BOM and empty inputs get their own `SampleVerdict` kinds instead of being scored or voted.
+
+**Sample report** (`consensus.SampleReport`):
+The per-distinct-sample audit record: its first-occurrence `index`, `occurrences`, `byte_length`, top-result `SampleVerdict`, the positively `supported` encodings with verdict kind and confidence, the `compatible` codecs that decode its window, and the `rejected` codecs with reasons. The support/rejection reasons survive into the public `ConsensusResult`, which never forces a highest-average-score winner.
+
 ### Public-API outputs
 
 **Detection request** (`_request.DetectionRequest`):

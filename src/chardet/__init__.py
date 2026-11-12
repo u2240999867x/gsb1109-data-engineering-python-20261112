@@ -7,6 +7,15 @@ from collections.abc import Iterable
 from chardet._request import _DEFAULT_CHUNK_SIZE, DetectionRequest
 from chardet._utils import DEFAULT_MAX_BYTES, MINIMUM_THRESHOLD
 from chardet._version import __version__
+from chardet.consensus import (
+    ConsensusConflict,
+    ConsensusResult,
+    ConsensusStatus,
+    EncodingRejection,
+    EncodingSupport,
+    SampleReport,
+    SampleVerdict,
+)
 from chardet.detector import UniversalDetector
 from chardet.enums import EncodingEra, LanguageFilter
 from chardet.pipeline import DetectionDict, DetectionResult
@@ -14,14 +23,22 @@ from chardet.pipeline import DetectionDict, DetectionResult
 __all__ = [
     "DEFAULT_MAX_BYTES",
     "MINIMUM_THRESHOLD",
+    "ConsensusConflict",
+    "ConsensusResult",
+    "ConsensusStatus",
     "DetectionDict",
     "DetectionResult",
     "EncodingEra",
+    "EncodingRejection",
+    "EncodingSupport",
     "LanguageFilter",
+    "SampleReport",
+    "SampleVerdict",
     "UniversalDetector",
     "__version__",
     "detect",
     "detect_all",
+    "detect_consensus",
 ]
 
 
@@ -187,4 +204,48 @@ def detect_all(  # noqa: PLR0913
         data[:max_bytes],
         all_results=True,
         ignore_threshold=ignore_threshold,
+    )
+
+
+def detect_consensus(  # noqa: PLR0913
+    samples: Iterable[bytes | bytearray],
+    *,
+    encoding_era: EncodingEra = EncodingEra.ALL,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    include_encodings: Iterable[str] | None = None,
+    exclude_encodings: Iterable[str] | None = None,
+    no_match_encoding: str = "cp1252",
+    empty_input_encoding: str = "utf-8",
+) -> ConsensusResult:
+    """Evaluate whether independent byte samples support a common encoding.
+
+    A thin public adapter over
+    :func:`chardet.consensus.detect_consensus`: each sample is analyzed
+    independently (never concatenated), identical contents count once, empty
+    and BOM samples get their own verdict kinds, and the result keeps every
+    sample's support and rejection reasons instead of forcing the
+    highest-scoring encoding.  See that function for the full semantics.
+
+    :param samples: The byte strings to compare, one per file or chunk.
+    :returns: A :class:`ConsensusResult`; call :meth:`ConsensusResult.to_dict`
+        for a JSON-friendly nested dictionary.
+    """
+    from chardet.consensus import (  # noqa: PLC0415
+        detect_consensus as _detect_consensus,
+    )
+
+    if isinstance(samples, (str, bytes, bytearray)):
+        msg = (
+            "samples must be a sequence of byte strings, not a single "
+            "byte string or scalar"
+        )
+        raise TypeError(msg)
+    return _detect_consensus(
+        list(samples),
+        encoding_era=encoding_era,
+        max_bytes=max_bytes,
+        include_encodings=include_encodings,
+        exclude_encodings=exclude_encodings,
+        no_match_encoding=no_match_encoding,
+        empty_input_encoding=empty_input_encoding,
     )
