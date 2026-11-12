@@ -14,13 +14,14 @@ from mimesis.exceptions import (
     FieldArityError,
     FieldError,
     FieldNameError,
+    FieldNotResumableError,
     FieldsetError,
     SchemaError,
 )
 from mimesis.keys import maybe, romanize
 from mimesis.locales import Locale
 from mimesis.random import Random
-from mimesis.schema import Field, Fieldset, Schema, SchemaContext
+from mimesis.schema import Field, Fieldset, Schema, SchemaContext, SchemaCursor
 from tests.test_providers.patterns import DATA_PROVIDER_STR_REGEX
 
 
@@ -633,3 +634,182 @@ def test_schema_context():
     assert ctx.index == 5
     assert ctx.iteration == 6
     assert ctx.custom["test"] == "value"
+
+
+def _none_skipping_schema(field, attempts, iterations=10, seed=0xFF):
+    def schema_callable():
+        attempts.append(1)
+        if len(attempts) % 3 == 0:
+            return None
+        return {"id": field("uuid"), "name": field("word")}
+
+    return Schema(schema=schema_callable, iterations=iterations, seed=seed)
+
+
+def test_create_page_matches_create(seed):
+    field = Field(seed=seed)
+    attempts: list = []
+    schema = _none_skipping_schema(field, attempts)
+
+    expected = schema.create()
+    assert len(attempts) == 14  # 10 valid + 4 skipped attempts
+
+    field.reseed(seed)
+    attempts.clear()
+
+    pages = []
+    cursor = None
+    delivered = 0
+    while delivered < schema.iterations:
+        page, cursor = schema.create_page(
+            min(4, schema.iterations - delivered), cursor=cursor, fields=[field]
+        )
+        assert page
+        pages.extend(page)
+        delivered += len(page)
+
+    assert pages == expected
+    chunks = [pages[i : i + 4] for i in range(0, 10, 4)]
+    assert [len(chunk) for chunk in chunks] == [4, 4, 2]
+
+
+def test_create_page_cursor_state(seed):
+    field = Field(seed=seed)
+    attempts: list = []
+    schema = _none_skipping_schema(field, attempts)
+
+    page, cursor = schema.create_page(4, max_attempts=100, fields=[field])
+
+    assert len(page) == 4
+    assert cursor.attempts == 5  # attempt 3 returned None and was skipped
+    assert cursor.delivered == 4
+    assert cursor.remaining_attempts == 95
+    assert len(cursor.random_states) == 1
+    # The cursor captured the randomness consumed by the field.
+    assert cursor.random_states[0] == field.get_random_instance().getstate()
+
+
+def test_create_page_resume_does_not_rerun_callbacks(seed):
+    field = Field(seed=seed)
+    attempts: list = []
+    schema = _none_skipping_schema(field, attempts)
+
+    cursor = None
+    delivered = 0
+    while delivered < schema.iterations:
+        _, cursor = schema.create_page(
+            min(4, schema.iterations - delivered), cursor=cursor, fields=[field]
+        )
+        delivered = cursor.delivered
+
+    # Every attempt ran exactly once: nothing was re-run on resume.
+    assert len(attempts) == cursor.attempts == 14
+    assert cursor.delivered == 10
+
+
+def test_create_page_attempt_budget(seed):
+    field = Field(seed=seed)
+    attempts: list = []
+    schema = _none_skipping_schema(field, attempts)
+
+    page, cursor = schema.create_page(10, max_attempts=5, fields=[field])
+
+    assert len(page) == 4  # attempt 3 returned None
+    assert cursor.attempts == 5
+    assert cursor.remaining_attempts == 0
+
+    # The budget is exhausted: the next page is empty.
+    next_page, cursor = schema.create_page(10, cursor=cursor, fields=[field])
+    assert next_page == []
+    assert cursor.remaining_attempts == 0
+
+
+def test_create_page_invalid_arguments(seed):
+    field = Field(seed=seed)
+    schema = Schema(schema=lambda: {"id": field("uuid")}, iterations=1)
+
+    with pytest.raises(ValueError):
+        schema.create_page(0, fields=[field])
+
+    with pytest.raises(ValueError):
+        schema.create_page(1, max_attempts=0, fields=[field])
+
+    _, cursor = schema.create_page(1, fields=[field])
+
+    with pytest.raises(ValueError):
+        schema.create_page(1, cursor=cursor, fields=[])
+
+
+def test_create_page_non_resumable_handler():
+    field = Field()
+
+    def external_source(random, **kwargs):
+        return "data from an external source"
+
+    field.register_handler("external_source", external_source)
+    schema = Schema(schema=lambda: {"x": field("external_source")}, iterations=1)
+
+    with pytest.raises(FieldNotResumableError) as exc_info:
+        schema.create_page(1, fields=[field])
+
+    assert exc_info.value.names == ["external_source"]
+    assert "external_source" in str(exc_info.value)
+
+
+def test_create_page_resumable_handler(seed):
+    field = Field(seed=seed)
+
+    def lucky_number(random, **kwargs):
+        return random.randint(1, 100)
+
+    field.register_handler("lucky_number", lucky_number, supports_resume=True)
+    schema = Schema(schema=lambda: {"n": field("lucky_number")}, iterations=4)
+
+    expected = schema.create()
+
+    field.reseed(seed)
+    first, cursor = schema.create_page(2, fields=[field])
+    second, _ = schema.create_page(2, cursor=cursor, fields=[field])
+
+    assert first + second == expected
+
+
+def test_create_page_resumable_handler_attribute(seed):
+    field = Field(seed=seed)
+
+    def lucky_number(random, **kwargs):
+        return random.randint(1, 100)
+
+    lucky_number.supports_resume = True
+    field.register_handler("lucky_number", lucky_number)
+
+    schema = Schema(schema=lambda: {"n": field("lucky_number")}, iterations=2)
+    page, cursor = schema.create_page(2, fields=[field])
+
+    assert len(page) == 2
+    assert cursor.delivered == 2
+
+
+def test_paginate_matches_create(seed):
+    field = Field(seed=seed)
+    attempts: list = []
+    schema = _none_skipping_schema(field, attempts)
+
+    expected = schema.create()
+
+    field.reseed(seed)
+    attempts.clear()
+
+    pages = list(schema.paginate(4, fields=[field]))
+
+    assert [len(page) for page in pages] == [4, 4, 2]
+    assert [item for page in pages for item in page] == expected
+
+
+def test_schema_cursor_repr_and_eq():
+    cursor = SchemaCursor(attempts=6, delivered=4, remaining_attempts=94)
+
+    assert "attempts=6" in repr(cursor)
+    assert cursor == SchemaCursor(attempts=6, delivered=4, remaining_attempts=94)
+    assert cursor != SchemaCursor(attempts=7, delivered=4, remaining_attempts=94)
+    assert cursor != "not a cursor"

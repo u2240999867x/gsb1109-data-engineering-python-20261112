@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+- Added resumable paginated export to ``Schema``: ``Schema.create_page()`` returns a page of valid items together with a ``SchemaCursor`` that captures the attempt counter (skipped attempts included), the number of delivered items, the remaining attempt budget, and the random state consumed by the fields. Handing the cursor to the next call resumes generation without re-running user callbacks, and concatenated pages match a single ``Schema.create()`` call.
+- Added ``Schema.paginate()`` to iterate over pages until the schema is exhausted.
+- Added ``BaseField.snapshot_state()``/``BaseField.restore_state()`` and ``BaseField.assert_resumable()``; custom field handlers can declare resume support via ``register_handler(..., supports_resume=True)`` or a ``supports_resume`` attribute.
+- Added ``FieldNotResumableError``, raised before a cursor is handed out when a field does not support resumable export.
+
 Version 21.0.0
 --------------
 

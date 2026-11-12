@@ -97,6 +97,21 @@ class FieldArityError(ValueError):
         )
 
 
+class FieldNotResumableError(ValueError):
+    """Raised when a field or handler does not support resumable export."""
+
+    def __init__(self, names: t.Sequence[str]) -> None:
+        """Initialize attributes for more informative output.
+
+        :param names: Names of the fields that are not resumable.
+        """
+        self.names = list(names)
+
+    def __str__(self) -> str:
+        names = ", ".join(f"«{name}»" for name in self.names)
+        return f"Fields do not support resumable export: {names}."
+
+
 class AliasesTypeError(TypeError):
     """Raised when aliases is not a flat dictionary."""
 

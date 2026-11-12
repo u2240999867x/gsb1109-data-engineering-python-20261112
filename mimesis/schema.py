@@ -14,6 +14,7 @@ from mimesis.exceptions import (
     FieldArityError,
     FieldError,
     FieldNameError,
+    FieldNotResumableError,
     FieldsetError,
     SchemaError,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "RegisterableFieldHandlers",
     "Schema",
     "SchemaContext",
+    "SchemaCursor",
     "SchemaTransformer",
 ]
 
@@ -48,7 +50,12 @@ class BaseField:
     """Base class for field and fieldset generators.
 
     :ivar aliases: A dictionary of aliases for standard fields.
+    :cvar supports_resume: Whether the field supports resumable
+        (paginated) export. Built-in fields do, because all their
+        randomness flows through a snapshot-able random instance.
     """
+
+    supports_resume: bool = True
 
     def __init__(
         self,
@@ -66,6 +73,7 @@ class BaseField:
         self._generic = Generic(locale, seed)
         self._cache: FieldCache = {}
         self._handlers: dict[str, FieldHandler] = {}
+        self._resumable_handlers: set[str] = set()
         self.aliases: dict[str, str] = {}
 
     def reseed(self, seed: Seed = MissingSeed) -> None:
@@ -81,6 +89,48 @@ class BaseField:
         :return: Random object.
         """
         return self._generic.random
+
+    def snapshot_state(self) -> Any:
+        """Snapshot the random state already consumed by this field.
+
+        The snapshot captures all randomness used so far, including
+        the randomness consumed by attempts that were skipped.
+
+        :return: The state of the random instance.
+        """
+        return self.get_random_instance().getstate()
+
+    def restore_state(self, state: Any) -> None:
+        """Restore a random state previously taken by :meth:`snapshot_state`.
+
+        :param state: The state of the random instance.
+        """
+        self.get_random_instance().setstate(state)
+
+    def assert_resumable(self) -> None:
+        """Ensure that this field supports resumable export.
+
+        Every registered custom handler must explicitly declare resume
+        support, either by passing ``supports_resume=True`` to
+        :meth:`register_handler` (or to the :meth:`handle` decorator),
+        or by setting a ``supports_resume = True`` attribute on the
+        handler itself.
+
+        :raises FieldNotResumableError: Naming every field that does
+            not support resumable export.
+        """
+        names = [
+            name
+            for name, handler in self._handlers.items()
+            if name not in self._resumable_handlers
+            and not getattr(handler, "supports_resume", False)
+        ]
+
+        if not self.supports_resume:
+            names.insert(0, self.__class__.__name__)
+
+        if names:
+            raise FieldNotResumableError(names)
 
     def _explicit_lookup(self, name: str) -> Any:
         """An explicit method lookup.
@@ -214,11 +264,20 @@ class BaseField:
 
         return result
 
-    def register_handler(self, field_name: str, field_handler: FieldHandler) -> None:
+    def register_handler(
+        self,
+        field_name: str,
+        field_handler: FieldHandler,
+        supports_resume: bool = False,
+    ) -> None:
         """Register a new field handler.
 
         :param field_name: Name of the field.
         :param field_handler: Callable object.
+        :param supports_resume: Whether the handler explicitly declares
+            support for resumable (paginated) export. Handlers that only
+            rely on the given ``random`` instance are resumable; handlers
+            backed by external data sources usually are not.
         """
         if not isinstance(field_name, str):
             raise TypeError("Field name must be a string.")
@@ -237,8 +296,15 @@ class BaseField:
         if field_name not in self._handlers:
             self._handlers[field_name] = field_handler
 
+        if supports_resume:
+            self._resumable_handlers.add(field_name)
+        else:
+            self._resumable_handlers.discard(field_name)
+
     def handle(
-        self, field_name: str | None = None
+        self,
+        field_name: str | None = None,
+        supports_resume: bool = False,
     ) -> Callable[[FieldHandler], FieldHandler]:
         """Decorator for registering a custom field handler.
 
@@ -249,12 +315,18 @@ class BaseField:
 
         :param field_name: Name of the field.
             If not specified, the name of the function is used.
+        :param supports_resume: Whether the handler explicitly declares
+            support for resumable (paginated) export.
         :return: Decorator.
         """
 
         def decorator(field_handler: FieldHandler) -> FieldHandler:
             _field_name = field_name or field_handler.__name__
-            self.register_handler(_field_name, field_handler)
+            self.register_handler(
+                _field_name,
+                field_handler,
+                supports_resume=supports_resume,
+            )
             return field_handler
 
         return decorator
@@ -274,6 +346,7 @@ class BaseField:
         :param field_name: Name of the field.
         """
         self._handlers.pop(field_name, None)
+        self._resumable_handlers.discard(field_name)
 
     def unregister_handlers(self, field_names: Sequence[str] = ()) -> None:
         """Unregister field handlers with the given names.
@@ -290,6 +363,7 @@ class BaseField:
         :return: None.
         """
         self._handlers.clear()
+        self._resumable_handlers.clear()
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__} <{self._generic.locale}>"
@@ -431,6 +505,69 @@ class SchemaContext:
         self.iteration = index + 1
         self.seed = seed
         self.custom = custom or {}
+
+
+class SchemaCursor:
+    """A resumable cursor for paginated schema export.
+
+    The cursor captures everything needed to resume generation exactly
+    where a previous page stopped, without re-running user callbacks:
+
+    - the original attempt number (attempts that returned ``None``
+      and were skipped count as well),
+    - the number of valid items delivered so far,
+    - the remaining attempt budget,
+    - the random state already consumed by every field.
+
+    :ivar attempts: Number of attempts consumed so far, i.e. the index
+        of the next attempt.
+    :ivar delivered: Number of valid items delivered so far.
+    :ivar remaining_attempts: Remaining attempt budget
+        (``None`` means unlimited).
+    :ivar random_states: Snapshots of the random states of the fields,
+        in the order the fields were passed to :meth:`Schema.create_page`.
+    """
+
+    __slots__ = ("attempts", "delivered", "random_states", "remaining_attempts")
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __init__(
+        self,
+        attempts: int = 0,
+        delivered: int = 0,
+        remaining_attempts: int | None = None,
+        random_states: Sequence[Any] = (),
+    ) -> None:
+        """Initialize cursor.
+
+        :param attempts: Number of attempts consumed so far.
+        :param delivered: Number of valid items delivered so far.
+        :param remaining_attempts: Remaining attempt budget.
+        :param random_states: Snapshots of the random states of the fields.
+        """
+        self.attempts = attempts
+        self.delivered = delivered
+        self.remaining_attempts = remaining_attempts
+        self.random_states = tuple(random_states)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SchemaCursor):
+            return NotImplemented
+        return (
+            self.attempts == other.attempts
+            and self.delivered == other.delivered
+            and self.remaining_attempts == other.remaining_attempts
+            and self.random_states == other.random_states
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"attempts={self.attempts}, "
+            f"delivered={self.delivered}, "
+            f"remaining_attempts={self.remaining_attempts})"
+        )
 
 
 class Schema:
@@ -580,6 +717,148 @@ class Schema:
             index += 1
 
         return results
+
+    def create_page(
+        self,
+        page_size: int,
+        *,
+        cursor: SchemaCursor | None = None,
+        max_attempts: int | None = None,
+        fields: Sequence[BaseField] = (),
+    ) -> tuple[list[JSON], SchemaCursor]:
+        """Create a single page of up to ``page_size`` valid items.
+
+        Pages are delimited by the number of *delivered* (valid) items:
+        attempts whose schema callable returns ``None`` are skipped, but
+        they still advance the attempt counter and consume the attempt
+        budget and random state.
+
+        The returned :class:`SchemaCursor` can be handed to the next call
+        to continue reading exactly where this page stopped, without
+        re-running the schema callable or the transformers of the items
+        that were already delivered. Concatenating the pages produced
+        this way yields the same result as a single :meth:`create` call.
+
+        Every field used by the schema callable must be passed via
+        ``fields`` so that its consumed random state can be snapshotted
+        into the cursor and restored on resume. Fields (including their
+        custom handlers) that do not explicitly declare resume support
+        are reported before any cursor is handed out.
+
+        :param page_size: Maximum number of valid items in the page.
+        :param cursor: Cursor returned by a previous call, or ``None``
+            to start from the beginning.
+        :param max_attempts: Total attempt budget (skipped attempts
+            included). Only applies when ``cursor`` is ``None``; on
+            resume the remaining budget is taken from the cursor.
+            ``None`` means unlimited.
+        :param fields: Fields used by the schema callable.
+        :return: A tuple of the page and the cursor for the next page.
+        :raises ValueError: If ``page_size`` or ``max_attempts`` is less
+            than 1, or if the cursor does not match the given fields.
+        :raises FieldNotResumableError: Naming every field that does
+            not support resumable export.
+        """
+        if page_size < 1:
+            raise ValueError("Page size must be at least 1.")
+
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("Number of max attempts must be at least 1.")
+
+        fields = list(fields)
+
+        for field in fields:
+            field.assert_resumable()
+
+        if cursor is None:
+            attempts, delivered = 0, 0
+            remaining_attempts = max_attempts
+        else:
+            attempts, delivered, remaining_attempts = self._resume(cursor, fields)
+
+        page: list[JSON] = []
+
+        while len(page) < page_size:
+            if remaining_attempts is not None and remaining_attempts <= 0:
+                break
+
+            result = self._create_item(attempts)
+            attempts += 1
+
+            if remaining_attempts is not None:
+                remaining_attempts -= 1
+
+            if result is not None:
+                page.append(result)
+                delivered += 1
+
+        next_cursor = SchemaCursor(
+            attempts=attempts,
+            delivered=delivered,
+            remaining_attempts=remaining_attempts,
+            random_states=[field.snapshot_state() for field in fields],
+        )
+
+        return page, next_cursor
+
+    @staticmethod
+    def _resume(
+        cursor: SchemaCursor,
+        fields: list[BaseField],
+    ) -> tuple[int, int, int | None]:
+        """Restore fields and counters from a cursor.
+
+        :param cursor: Cursor returned by a previous call.
+        :param fields: Fields used by the schema callable.
+        :return: A tuple of attempts, delivered and remaining attempts.
+        :raises ValueError: If the cursor does not match the given fields.
+        """
+        if len(cursor.random_states) != len(fields):
+            raise ValueError(
+                "The cursor does not match the given fields: "
+                "pass the same fields in the same order."
+            )
+
+        for field, state in zip(fields, cursor.random_states, strict=True):
+            field.restore_state(state)
+
+        return cursor.attempts, cursor.delivered, cursor.remaining_attempts
+
+    def paginate(
+        self,
+        page_size: int,
+        *,
+        max_attempts: int | None = None,
+        fields: Sequence[BaseField] = (),
+    ) -> Iterator[list[JSON]]:
+        """Iterate over pages of valid items until the schema is exhausted.
+
+        Pages are generated until ``self.iterations`` valid items are
+        delivered or the attempt budget is exhausted. Concatenating all
+        pages yields the same result as a single :meth:`create` call.
+
+        :param page_size: Maximum number of valid items per page.
+        :param max_attempts: Total attempt budget (skipped attempts
+            included). ``None`` means unlimited.
+        :param fields: Fields used by the schema callable.
+        :return: Iterator of pages.
+        """
+        cursor: SchemaCursor | None = None
+        delivered = 0
+
+        while delivered < self.iterations:
+            page, cursor = self.create_page(
+                min(page_size, self.iterations - delivered),
+                cursor=cursor,
+                max_attempts=max_attempts,
+                fields=fields,
+            )
+
+            if not page:
+                break
+
+            delivered += len(page)
+            yield page
 
     def iterator(self) -> Iterator[JSON]:
         """Return an iterator for the schema.

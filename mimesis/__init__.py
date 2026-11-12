@@ -39,6 +39,7 @@ from .exceptions import (
     FieldArityError,
     FieldError,
     FieldNameError,
+    FieldNotResumableError,
     FieldsetError,
     LocaleError,
     NonEnumerableError,
@@ -69,7 +70,7 @@ from .providers import (
     Text,
     Transport,
 )
-from .schema import Field, Fieldset, Schema
+from .schema import Field, Fieldset, Schema, SchemaCursor
 
 
 __all__ = [
@@ -98,6 +99,7 @@ __all__ = [
     "FieldArityError",
     "FieldError",
     "FieldNameError",
+    "FieldNotResumableError",
     "Fieldset",
     "FieldsetError",
     "File",
@@ -127,6 +129,7 @@ __all__ = [
     "Schema",
     # Schema:
     "SchemaBuilder",
+    "SchemaCursor",
     "SchemaError",
     "SchemaRef",
     "Science",
