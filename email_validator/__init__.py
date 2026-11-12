@@ -4,9 +4,10 @@ from typing import TYPE_CHECKING
 from .exceptions import EmailNotValidError, EmailSyntaxError, EmailUndeliverableError
 from .types import ValidatedEmail
 from .validate_email import validate_email
+from .batch import validate_emails
 from .version import __version__
 
-__all__ = ["validate_email",
+__all__ = ["validate_email", "validate_emails",
            "ValidatedEmail", "EmailNotValidError",
            "EmailSyntaxError", "EmailUndeliverableError",
            "caching_resolver", "__version__"]

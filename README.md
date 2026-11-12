@@ -180,6 +180,35 @@ email_validator.SPECIAL_USE_DOMAIN_NAMES.remove("test")
 
 It is tempting to use `@example.com/net/org` in tests. They are *not* in this library's `SPECIAL_USE_DOMAIN_NAMES` list so you can, but shouldn't, use them. These domains are reserved to IANA for use in documentation so there is no risk of accidentally emailing someone at those domains. But beware that this library will nevertheless reject these domain names if DNS-based deliverability checks are not disabled because these domains do not resolve to domains that accept email. In tests, consider using your own domain name or `@test` or `@myname.test` instead.
 
+### Validating many addresses in bulk
+
+`validate_emails` validates a stream of addresses lazily and yields
+`(input, result)` tuples in input order, where `result` is a
+`ValidatedEmail` or the exception that row raised (errors are yielded as
+values so one bad row does not abort the batch). The input may be any
+iterable, including a long non-rewindable iterator:
+
+```python
+from email_validator import validate_emails, caching_resolver
+
+resolver = caching_resolver(timeout=10)
+
+for email, result in validate_emails(emails, max_lookahead=16, dns_resolver=resolver):
+    if isinstance(result, Exception):
+        print(email, "failed:", result)
+    else:
+        print(email, "is deliverable as", result.normalized)
+```
+
+At most `max_lookahead` rows are read ahead of the row currently being
+yielded, so the source is only pulled as results are consumed, completed
+results buffered behind a slow domain stay bounded by the window, and
+stopping iteration early stops pulling from the source. Rows in flight
+that share the same normalized ASCII domain and options share a single
+DNS check; the shared result (including temporary "unknown" outcomes) is
+dropped once those rows are consumed, so rows read in later windows are
+checked afresh. Keyword arguments are the same as for `validate_email`.
+
 Internationalized email addresses
 ---------------------------------
 
