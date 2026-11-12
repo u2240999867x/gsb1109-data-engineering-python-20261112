@@ -113,9 +113,16 @@ class ExtendedJsonPathParser(parser.JsonPathParser):
         self,
         debug: bool | None = None,
         lexer_class: type[lexer.JsonPathLexer] | None = None,
+        strict_arithmetic: bool = False,
+        allow_scalar_broadcast: bool = False,
     ) -> None:
         lexer_class = lexer_class or ExtendedJsonPathLexer
         super().__init__(debug, lexer_class)
+        # When strict arithmetic is enabled, operations align multi-value
+        # operands by their common parent record and expose isolated rows
+        # through `Operation.find_strict()`.
+        self.strict_arithmetic = strict_arithmetic
+        self.allow_scalar_broadcast = allow_scalar_broadcast
 
     def p_jsonpath_operator_jsonpath(self, p: _ExtProduction) -> None:
         """jsonpath : NUMBER operator NUMBER
@@ -136,7 +143,13 @@ class ExtendedJsonPathParser(parser.JsonPathParser):
             if isinstance(item, Fields) and len(item.fields) == 1:  # noqa
                 p[i] = item.fields[0]
 
-        p[0] = _arithmetic.Operation(p[1], p[2], p[3])
+        p[0] = _arithmetic.Operation(
+            p[1],
+            p[2],
+            p[3],
+            strict=self.strict_arithmetic,
+            allow_scalar_broadcast=self.allow_scalar_broadcast,
+        )
 
     def p_operator(self, p: _ExtProduction) -> None:
         """operator : '+'
@@ -353,8 +366,18 @@ class ExtendedJsonPathParser(parser.JsonPathParser):
     )
 
 
-def parse(path: str, debug: bool | None = None) -> JSONPath:
-    return ExtendedJsonPathParser(debug=debug).parse(path)
+def parse(
+    path: str,
+    debug: bool | None = None,
+    *,
+    strict_arithmetic: bool = False,
+    allow_scalar_broadcast: bool = False,
+) -> JSONPath:
+    return ExtendedJsonPathParser(
+        debug=debug,
+        strict_arithmetic=strict_arithmetic,
+        allow_scalar_broadcast=allow_scalar_broadcast,
+    ).parse(path)
 
 
 def __getattr__(name: str) -> object:

@@ -286,6 +286,44 @@ Example with data:
 
 | ``$.objects[\*].cow + $.objects[\*].cat`` returns ``[6, 9]``
 
+Strict, parent-record-aligned arithmetic
+----------------------------------------
+
+Pairing two JSONPath operands positionally is only safe when both queries
+select exactly the same set of records. Each query matching two items does not
+mean those items belong to the same two detail rows. Pass
+``strict_arithmetic=True`` to align operands by their common parent record
+instead.
+
+In strict mode a column that is missing inside a source row is isolated against
+that row, and multiple values for one operand inside a single record are
+reported as ambiguous rather than guessed. Call ``find_strict()`` to receive the
+rows that can be stored together with the isolated rows and the reason for each
+isolation.
+
+..  code-block:: python
+
+    from jsonpath_ng.ext import parser
+
+    data = {"invoices": [
+        {"id": "A", "qty": 2, "price": 5},
+        {"id": "B", "qty": 3, "price": 7},
+        {"id": "C", "qty": 4},  # no price
+    ]}
+    query = parser.parse(
+        "$.invoices[*].qty * $.invoices[*].price",
+        strict_arithmetic=True,
+    )
+    outcome = query.find_strict(data)
+    outcome.values                       # [10, 21]
+    outcome.quarantined[0].reason        # "missing"
+    outcome.quarantined[0].path          # "invoices.[2]"
+
+Pass ``allow_scalar_broadcast=True`` to broadcast a single scalar value across
+the other operand's values. Broadcasting stays inside the parent record where
+the scalar was found and never fills a gap in a different record; repeated
+values are kept at their own hit positions.
+
 Other examples
 --------------
 
