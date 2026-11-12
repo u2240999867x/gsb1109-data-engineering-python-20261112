@@ -1,3 +1,13 @@
+# Unreleased
+
+- Add the `keep_packed_prefix` option to the pure Python `Packer`.  With
+  `autoreset=False`, a failed pack now optionally keeps the bytes of the
+  previously packed messages instead of clearing the whole buffer; only the
+  partial message is discarded and packing can continue.  Caller-owned payloads
+  such as large binary columns are staged by reference, so a failure copies
+  neither those bytes nor the accumulated batch.  Reentrant packing from the
+  `default` callback is rejected with `RuntimeError`.
+
 # 1.2.4
 
 Release Date: 2026-10-27

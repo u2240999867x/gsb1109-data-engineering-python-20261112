@@ -651,6 +651,14 @@ class Packer:
         Reset buffer after each pack and return its content as `bytes`. (default: True).
         If set this to false, use `bytes()` to get content and `.reset()` to clear buffer.
 
+    :param bool keep_packed_prefix:
+        Kept only when *autoreset* is false.  When true, a failed pack leaves the
+        bytes of the previously packed messages untouched instead of clearing the
+        whole buffer; only the partial message is discarded.  (default: False)
+        Payloads already held by the caller (large binary columns, ext data) are
+        appended by reference while a message is being built, so a failure does not
+        copy the bytes accumulated for the batch.
+
     :param bool use_bin_type:
         Use bin type introduced in msgpack spec 2.0 for bytes.
         It also enables str8 type for unicode. (default: True)
@@ -682,6 +690,7 @@ class Packer:
         default=None,
         use_single_float=False,
         autoreset=True,
+        keep_packed_prefix=False,
         use_bin_type=True,
         strict_types=False,
         datetime=False,
@@ -691,13 +700,57 @@ class Packer:
         self._strict_types = strict_types
         self._use_float = use_single_float
         self._autoreset = autoreset
+        self._keep_packed_prefix = keep_packed_prefix and not autoreset
         self._use_bin_type = use_bin_type
         self._buffer = BytesIO()
+        # Bytes of the message currently being packed, appended by reference.
+        # Only used while keep_packed_prefix is active; None otherwise.
+        self._pending = None
+        # True between _begin() and _commit()/_rollback(), also used to reject
+        # reentrant writes from the `default` callback.
+        self._packing = False
         self._datetime = bool(datetime)
         self._unicode_errors = unicode_errors or "strict"
         if default is not None and not callable(default):
             raise TypeError("default must be callable")
         self._default = default
+
+    def _write(self, data):
+        # Fast path: stage caller-owned payloads (large binary columns, ext
+        # bodies) by reference so their bytes are never copied, neither while
+        # building a message nor when an already accumulated batch is flushed.
+        pending = self._pending
+        if pending is not None:
+            pending.append(data)
+        else:
+            self._buffer.write(data)
+
+    def _begin(self):
+        if self._keep_packed_prefix:
+            if self._packing:
+                raise RuntimeError("Packer is not reentrant")
+            self._packing = True
+            self._pending = []
+
+    def _rollback(self):
+        # Drop only the partial message; the committed prefix in self._buffer
+        # is left intact and is never touched or copied on failure.
+        self._pending = None
+        self._packing = False
+
+    def _commit(self):
+        pending = self._pending
+        if pending is not None:
+            for chunk in pending:
+                self._buffer.write(chunk)
+            self._pending = None
+        self._packing = False
+
+    def _abort(self):
+        if self._keep_packed_prefix:
+            self._rollback()
+        else:
+            self._buffer = BytesIO()  # force reset
 
     def _pack(
         self,
@@ -717,32 +770,32 @@ class Packer:
             if nest_limit < 0:
                 raise ValueError("recursion limit exceeded")
             if obj is None:
-                return self._buffer.write(b"\xc0")
+                return self._write(b"\xc0")
             if check(obj, bool):
                 if obj:
-                    return self._buffer.write(b"\xc3")
-                return self._buffer.write(b"\xc2")
+                    return self._write(b"\xc3")
+                return self._write(b"\xc2")
             if check(obj, int):
                 if 0 <= obj < 0x80:
-                    return self._buffer.write(struct.pack("B", obj))
+                    return self._write(struct.pack("B", obj))
                 if -0x20 <= obj < 0:
-                    return self._buffer.write(struct.pack("b", obj))
+                    return self._write(struct.pack("b", obj))
                 if 0x80 <= obj <= 0xFF:
-                    return self._buffer.write(struct.pack("BB", 0xCC, obj))
+                    return self._write(struct.pack("BB", 0xCC, obj))
                 if -0x80 <= obj < 0:
-                    return self._buffer.write(struct.pack(">Bb", 0xD0, obj))
+                    return self._write(struct.pack(">Bb", 0xD0, obj))
                 if 0xFF < obj <= 0xFFFF:
-                    return self._buffer.write(struct.pack(">BH", 0xCD, obj))
+                    return self._write(struct.pack(">BH", 0xCD, obj))
                 if -0x8000 <= obj < -0x80:
-                    return self._buffer.write(struct.pack(">Bh", 0xD1, obj))
+                    return self._write(struct.pack(">Bh", 0xD1, obj))
                 if 0xFFFF < obj <= 0xFFFFFFFF:
-                    return self._buffer.write(struct.pack(">BI", 0xCE, obj))
+                    return self._write(struct.pack(">BI", 0xCE, obj))
                 if -0x80000000 <= obj < -0x8000:
-                    return self._buffer.write(struct.pack(">Bi", 0xD2, obj))
+                    return self._write(struct.pack(">Bi", 0xD2, obj))
                 if 0xFFFFFFFF < obj <= 0xFFFFFFFFFFFFFFFF:
-                    return self._buffer.write(struct.pack(">BQ", 0xCF, obj))
+                    return self._write(struct.pack(">BQ", 0xCF, obj))
                 if -0x8000000000000000 <= obj < -0x80000000:
-                    return self._buffer.write(struct.pack(">Bq", 0xD3, obj))
+                    return self._write(struct.pack(">Bq", 0xD3, obj))
                 if not default_used and self._default is not None:
                     obj = self._default(obj)
                     default_used = True
@@ -753,24 +806,24 @@ class Packer:
                 if n >= 2**32:
                     raise ValueError("%s is too large" % type(obj).__name__)
                 self._pack_bin_header(n)
-                return self._buffer.write(obj)
+                return self._write(obj)
             if check(obj, str):
                 obj = obj.encode("utf-8", self._unicode_errors)
                 n = len(obj)
                 if n >= 2**32:
                     raise ValueError("String is too large")
                 self._pack_raw_header(n)
-                return self._buffer.write(obj)
+                return self._write(obj)
             if check(obj, memoryview):
                 n = obj.nbytes
                 if n >= 2**32:
                     raise ValueError("Memoryview is too large")
                 self._pack_bin_header(n)
-                return self._buffer.write(obj)
+                return self._write(obj)
             if check(obj, float):
                 if self._use_float:
-                    return self._buffer.write(struct.pack(">Bf", 0xCA, obj))
-                return self._buffer.write(struct.pack(">Bd", 0xCB, obj))
+                    return self._write(struct.pack(">Bf", 0xCA, obj))
+                return self._write(struct.pack(">Bd", 0xCB, obj))
             if check(obj, (ExtType, Timestamp)):
                 if check(obj, Timestamp):
                     code = -1
@@ -782,23 +835,23 @@ class Packer:
                 assert isinstance(data, bytes)
                 L = len(data)
                 if L == 1:
-                    self._buffer.write(b"\xd4")
+                    self._write(b"\xd4")
                 elif L == 2:
-                    self._buffer.write(b"\xd5")
+                    self._write(b"\xd5")
                 elif L == 4:
-                    self._buffer.write(b"\xd6")
+                    self._write(b"\xd6")
                 elif L == 8:
-                    self._buffer.write(b"\xd7")
+                    self._write(b"\xd7")
                 elif L == 16:
-                    self._buffer.write(b"\xd8")
+                    self._write(b"\xd8")
                 elif L <= 0xFF:
-                    self._buffer.write(struct.pack(">BB", 0xC7, L))
+                    self._write(struct.pack(">BB", 0xC7, L))
                 elif L <= 0xFFFF:
-                    self._buffer.write(struct.pack(">BH", 0xC8, L))
+                    self._write(struct.pack(">BH", 0xC8, L))
                 else:
-                    self._buffer.write(struct.pack(">BI", 0xC9, L))
-                self._buffer.write(struct.pack("b", code))
-                self._buffer.write(data)
+                    self._write(struct.pack(">BI", 0xC9, L))
+                self._write(struct.pack("b", code))
+                self._write(data)
                 return
             if check(obj, list_types):
                 n = len(obj)
@@ -825,18 +878,26 @@ class Packer:
             raise TypeError(f"Cannot serialize {obj!r}")
 
     def pack(self, obj):
+        self._begin()
         try:
             self._pack(obj)
-        except:
-            self._buffer = BytesIO()  # force reset
+        except BaseException:
+            self._abort()
             raise
+        self._commit()
         if self._autoreset:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
             return ret
 
     def pack_map_pairs(self, pairs):
-        self._pack_map_pairs(len(pairs), pairs)
+        self._begin()
+        try:
+            self._pack_map_pairs(len(pairs), pairs)
+        except BaseException:
+            self._abort()
+            raise
+        self._commit()
         if self._autoreset:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
@@ -847,7 +908,13 @@ class Packer:
             raise ValueError("array size must be non-negative")
         if n >= 2**32:
             raise ValueError
-        self._pack_array_header(n)
+        self._begin()
+        try:
+            self._pack_array_header(n)
+        except BaseException:
+            self._abort()
+            raise
+        self._commit()
         if self._autoreset:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
@@ -858,7 +925,13 @@ class Packer:
             raise ValueError("map size must be non-negative")
         if n >= 2**32:
             raise ValueError
-        self._pack_map_header(n)
+        self._begin()
+        try:
+            self._pack_map_header(n)
+        except BaseException:
+            self._abort()
+            raise
+        self._commit()
         if self._autoreset:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
@@ -874,24 +947,30 @@ class Packer:
         L = len(data)
         if L > 0xFFFFFFFF:
             raise ValueError("Too large data")
-        if L == 1:
-            self._buffer.write(b"\xd4")
-        elif L == 2:
-            self._buffer.write(b"\xd5")
-        elif L == 4:
-            self._buffer.write(b"\xd6")
-        elif L == 8:
-            self._buffer.write(b"\xd7")
-        elif L == 16:
-            self._buffer.write(b"\xd8")
-        elif L <= 0xFF:
-            self._buffer.write(b"\xc7" + struct.pack("B", L))
-        elif L <= 0xFFFF:
-            self._buffer.write(b"\xc8" + struct.pack(">H", L))
-        else:
-            self._buffer.write(b"\xc9" + struct.pack(">I", L))
-        self._buffer.write(struct.pack("B", typecode))
-        self._buffer.write(data)
+        self._begin()
+        try:
+            if L == 1:
+                self._write(b"\xd4")
+            elif L == 2:
+                self._write(b"\xd5")
+            elif L == 4:
+                self._write(b"\xd6")
+            elif L == 8:
+                self._write(b"\xd7")
+            elif L == 16:
+                self._write(b"\xd8")
+            elif L <= 0xFF:
+                self._write(b"\xc7" + struct.pack("B", L))
+            elif L <= 0xFFFF:
+                self._write(b"\xc8" + struct.pack(">H", L))
+            else:
+                self._write(b"\xc9" + struct.pack(">I", L))
+            self._write(struct.pack("B", typecode))
+            self._write(data)
+        except BaseException:
+            self._abort()
+            raise
+        self._commit()
         if self._autoreset:
             ret = self._buffer.getvalue()
             self._buffer = BytesIO()
@@ -899,20 +978,20 @@ class Packer:
 
     def _pack_array_header(self, n):
         if n <= 0x0F:
-            return self._buffer.write(struct.pack("B", 0x90 + n))
+            return self._write(struct.pack("B", 0x90 + n))
         if n <= 0xFFFF:
-            return self._buffer.write(struct.pack(">BH", 0xDC, n))
+            return self._write(struct.pack(">BH", 0xDC, n))
         if n <= 0xFFFFFFFF:
-            return self._buffer.write(struct.pack(">BI", 0xDD, n))
+            return self._write(struct.pack(">BI", 0xDD, n))
         raise ValueError("Array is too large")
 
     def _pack_map_header(self, n):
         if n <= 0x0F:
-            return self._buffer.write(struct.pack("B", 0x80 + n))
+            return self._write(struct.pack("B", 0x80 + n))
         if n <= 0xFFFF:
-            return self._buffer.write(struct.pack(">BH", 0xDE, n))
+            return self._write(struct.pack(">BH", 0xDE, n))
         if n <= 0xFFFFFFFF:
-            return self._buffer.write(struct.pack(">BI", 0xDF, n))
+            return self._write(struct.pack(">BI", 0xDF, n))
         raise ValueError("Dict is too large")
 
     def _pack_map_pairs(self, n, pairs, nest_limit=DEFAULT_RECURSE_LIMIT):
@@ -923,13 +1002,13 @@ class Packer:
 
     def _pack_raw_header(self, n):
         if n <= 0x1F:
-            self._buffer.write(struct.pack("B", 0xA0 + n))
+            self._write(struct.pack("B", 0xA0 + n))
         elif self._use_bin_type and n <= 0xFF:
-            self._buffer.write(struct.pack(">BB", 0xD9, n))
+            self._write(struct.pack(">BB", 0xD9, n))
         elif n <= 0xFFFF:
-            self._buffer.write(struct.pack(">BH", 0xDA, n))
+            self._write(struct.pack(">BH", 0xDA, n))
         elif n <= 0xFFFFFFFF:
-            self._buffer.write(struct.pack(">BI", 0xDB, n))
+            self._write(struct.pack(">BI", 0xDB, n))
         else:
             raise ValueError("Raw is too large")
 
@@ -937,11 +1016,11 @@ class Packer:
         if not self._use_bin_type:
             return self._pack_raw_header(n)
         elif n <= 0xFF:
-            return self._buffer.write(struct.pack(">BB", 0xC4, n))
+            return self._write(struct.pack(">BB", 0xC4, n))
         elif n <= 0xFFFF:
-            return self._buffer.write(struct.pack(">BH", 0xC5, n))
+            return self._write(struct.pack(">BH", 0xC5, n))
         elif n <= 0xFFFFFFFF:
-            return self._buffer.write(struct.pack(">BI", 0xC6, n))
+            return self._write(struct.pack(">BI", 0xC6, n))
         else:
             raise ValueError("Bin is too large")
 
@@ -955,6 +1034,8 @@ class Packer:
         This method is useful only when autoreset=False.
         """
         self._buffer = BytesIO()
+        self._pending = None
+        self._packing = False
 
     def getbuffer(self):
         """Return view of internal buffer."""
