@@ -1,0 +1,747 @@
+import re
+
+from unittest.mock import patch
+
+import pytest
+
+from faker.providers.currency.mk_MK import Provider as MkMKCurrencyProvider
+
+
+class TestArDz:
+    """Test ar_DZ currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.ar_DZ import Provider as ArDzCurrencyProvider
+
+        cls.provider = ArDzCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+            assert pricetag.endswith("\N{NO-BREAK SPACE}دج")
+
+
+class TestAzAz:
+    """Test az_AZ currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.az_AZ import Provider as AzAzCurrencyProvider
+
+        cls.provider = AzAzCurrencyProvider
+        cls.currencies = cls.provider.currencies
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple) and cur in self.currencies
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestCsCz:
+    """Test cs_CZ currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.cs_CZ import Provider as CsCzCurrencyProvider
+
+        cls.provider = CsCzCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestCurrencyProvider:
+    """Test currency provider methods"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency import Provider as CurrencyProvider
+
+        cls.provider = CurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.cryptocurrencies = cls.provider.cryptocurrencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+        cls.cryptocurrency_codes, cls.cryptocurrency_names = tuple(zip(*cls.cryptocurrencies))
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple)
+            assert cur in self.currencies
+
+    def test_currency_code(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            assert isinstance(code, str) and code in self.currency_codes
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert isinstance(name, str) and name in self.currency_names
+
+    def test_currency_code_has_symbol(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            symbol = faker.currency_symbol(code=code)
+            assert isinstance(symbol, str)
+
+    def test_currency_symbol_no_code_supplied(self, faker, num_samples):
+        for _ in range(num_samples):
+            symbol = faker.currency_symbol()
+            assert isinstance(symbol, str)
+            assert symbol in self.provider.currency_symbols.values()
+
+    @patch("faker.providers.currency.Provider.random_element")
+    def test_currency_symbol_with_valid_code(self, mock_random_element, faker):
+        symbol = faker.currency_symbol(code="USD")
+        assert symbol == "$"
+        mock_random_element.assert_not_called()
+
+    @patch("faker.providers.currency.Provider.random_element")
+    def test_currency_symbol_with_invalid_code(self, mock_random_element, faker):
+        invalid_code = "FTW"
+        with pytest.raises(KeyError):
+            faker.currency_symbol(code=invalid_code)
+        mock_random_element.assert_not_called()
+
+    def test_cryptocurrency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.cryptocurrency()
+            assert isinstance(cur, tuple)
+            assert cur in self.cryptocurrencies
+
+    def test_cryptocurrency_code(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.cryptocurrency_code()
+            assert isinstance(code, str) and code in self.cryptocurrency_codes
+
+    def test_cryptocurrency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.cryptocurrency_name()
+            assert isinstance(name, str) and name in self.cryptocurrency_names
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestBaseCurrencyData:
+    """The locale-independent currency table has to track ISO 4217.
+
+    Kept apart from TestCurrencyProvider because the localised providers
+    subclass it, and their tables are maintained by speakers of those locales.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency import Provider as CurrencyProvider
+
+        cls.provider = CurrencyProvider
+        cls.currency_codes = tuple(code for code, _ in cls.provider.currencies)
+
+    def test_currencies_are_current_iso_4217(self):
+        # Codes ISO 4217 has withdrawn, against the code that took over. A
+        # generator handing out a withdrawn code makes fixtures that no
+        # validating system will accept, so neither side of this mapping may
+        # drift back in.
+        superseded = {
+            "ANG": "XCG",  # Caribbean guilder, 2025-03-31
+            "BYR": "BYN",  # Belarusian ruble redenominated, 2016-07-01
+            "MRO": "MRU",  # Mauritanian ouguiya redenominated, 2018-01-01
+            "SLL": "SLE",  # Sierra Leonean leone redenominated, 2022-04-01
+            "STD": "STN",  # São Tomé and Príncipe dobra redenominated, 2018-01-01
+            "VEF": "VES",  # Venezuelan bolívar redenominated, 2018-08-20
+            "ZWD": "ZWG",  # Zimbabwe Gold, 2024-04-05
+        }
+        # Withdrawn with no successor code: the country adopted the euro.
+        retired = {
+            "BGN": "Bulgaria adopted the euro on 2026-01-01",
+            "HRK": "Croatia adopted the euro on 2023-01-01",
+            "LTL": "Lithuania adopted the euro on 2015-01-01",
+        }
+        for old, new in superseded.items():
+            assert old not in self.currency_codes, f"{old} was replaced by {new}"
+            assert new in self.currency_codes, f"{new} replaced {old}"
+        for old, why in retired.items():
+            assert old not in self.currency_codes, f"{old}: {why}"
+
+    def test_every_currency_has_a_symbol(self):
+        # currency_symbol() falls back to the generic currency sign, so a
+        # missing entry is silent; catch it here instead.
+        for code in self.currency_codes:
+            assert code in self.provider.currency_symbols, f"no symbol for {code}"
+
+
+class TestDeAt:
+    """Test de_AT currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.de_AT import Provider as DeAtCurrencyProvider
+
+        cls.provider = DeAtCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_names = [currency_name for currency_code, currency_name in cls.currencies]
+        cls.currency_codes = [currency_code for currency_code, currency_name in cls.currencies]
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.provider.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+    def test_currency_code(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            assert code in self.currency_codes
+
+
+class TestDeCh:
+    """Test de_CH currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.de_CH import Provider as DeChCurrencyProvider
+
+        cls.provider = DeChCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_names = [currency_name for currency_code, currency_name in cls.currencies]
+        cls.currency_codes = [currency_code for currency_code, currency_name in cls.currencies]
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.provider.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+    def test_currency_code(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            assert code in self.currency_codes
+
+
+class TestDeDe:
+    """Test de_DE currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.de_DE import Provider as DeDeCurrencyProvider
+
+        cls.provider = DeDeCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_names = [currency_name for currency_code, currency_name in cls.currencies]
+        cls.currency_codes = [currency_code for currency_code, currency_name in cls.currencies]
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.provider.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+    def test_currency_code(self, faker, num_samples):
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            assert code in self.currency_codes
+
+
+class TestElGr:
+    """Test nl_NL currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.el_GR import Provider as ElGrCurrencyProvider
+
+        cls.provider = ElGrCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestEnAu:
+    """Test en_AU currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.en_AU import Provider as EnAuCurrencyProvider
+
+        cls.provider = EnAuCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestEnCa:
+    """Test en_CA currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.en_CA import Provider as EnCaCurrencyProvider
+
+        cls.provider = EnCaCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestEsEs:
+    """Test es_ES currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.es_ES import Provider as EsEsCurrencyProvider
+
+        cls.provider = EsEsCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestFaIr:
+    """Test fa_IR currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.fa_IR import Provider as FaIrCurrencyProvider
+
+        cls.provider = FaIrCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestFrCa:
+    """Test fr_CA currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.fr_CA import Provider as FrCaCurrencyProvider
+
+        cls.provider = FrCaCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestFrDz:
+    """Test fr_DZ currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.fr_DZ import Provider as FrDzCurrencyProvider
+
+        cls.provider = FrDzCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+            assert pricetag.endswith("\N{NO-BREAK SPACE}DA")
+
+
+class TestFrFr:
+    """Test fr_FR currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.fr_FR import Provider as FrFrCurrencyProvider
+
+        cls.provider = FrFrCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestItIt:
+    """Test it_IT currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.it_IT import Provider as ItItCurrencyProvider
+
+        cls.provider = ItItCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestNgNg:
+    """Test ng_NG currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.ng_NG import Provider as NgNgCurrencyProvider
+
+        cls.provider = NgNgCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestNlNl:
+    """Test nl_NL currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.nl_NL import Provider as NlCurrencyProvider
+
+        cls.provider = NlCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestPlPl:
+    """Test pl_PL currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.pl_PL import Provider as PlPlCurrencyProvider
+
+        cls.provider = PlPlCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestPtBr:
+    """Test pt_BR currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.pt_BR import Provider as PtBrCurrencyProvider
+
+        cls.provider = PtBrCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestRoRo:
+    """Test ro_RO currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.ro_RO import Provider as RoRoCurrencyProvider
+
+        cls.provider = RoRoCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestRuRu:
+    """Test ru_RU currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.ru_RU import Provider as RuRuCurrencyProvider
+
+        cls.provider = RuRuCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+
+        cls.pricetag_pattern = re.compile(r"\d{1,3}(?:\s\d{3})*,\d{2}\sр\.")
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple) and cur in self.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert isinstance(name, str) and name in self.currency_names
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+            assert self.pricetag_pattern.fullmatch(pricetag)
+
+
+class TestSkSk:
+    """Test sk_SK currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.sk_SK import Provider as SkSkCurrencyProvider
+
+        cls.provider = SkSkCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestSvSe:
+    """Test sv_SE currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.sv_SE import Provider as SvSeCurrencyProvider
+
+        cls.provider = SvSeCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+
+class TestThTh:
+    """Test th_TH currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.th_TH import Provider as ThThCurrencyProvider
+
+        cls.provider = ThThCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert cur in self.currencies
+
+    def test_currency_name(self, faker, num_samples):
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert name in self.currency_names
+
+
+class TestTrTr:
+    """Test tr_TR currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.tr_TR import Provider as TrTrCurrencyProvider
+
+        cls.provider = TrTrCurrencyProvider
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestUkUa(TestCurrencyProvider):
+    """Test uk_UA currency provider."""
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.uk_UA import Provider as UkUaCurrencyProvider
+
+        cls.provider = UkUaCurrencyProvider
+        cls.currencies = cls.provider.currencies
+        cls.cryptocurrencies = cls.provider.cryptocurrencies
+        cls.currency_codes, cls.currency_names = tuple(zip(*cls.currencies))
+        cls.cryptocurrency_codes, cls.cryptocurrency_names = tuple(zip(*cls.cryptocurrencies))
+
+
+class TestUzUz:
+    """Test uz_UZ currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.uz_UZ import Provider as UzUzCurrencyProvider
+
+        cls.provider = UzUzCurrencyProvider
+        cls.currencies = cls.provider.currencies
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple) and cur in self.currencies
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestViVn:
+    """Test vi_VN currency provider"""
+
+    num_samples = 100
+
+    @classmethod
+    def setup_class(cls):
+        from faker.providers.currency.vi_VN import Provider as ViVNCurrencyProvider
+
+        cls.provider = ViVNCurrencyProvider
+        cls.currencies = cls.provider.currencies
+
+    def test_currency(self, faker, num_samples):
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple) and cur in self.currencies
+
+    def test_pricetag(self, faker, num_samples):
+        for _ in range(num_samples):
+            pricetag = faker.pricetag()
+            assert isinstance(pricetag, str)
+
+
+class TestMkMk:
+    """Test mk_MK currency provider methods"""
+
+    def test_currency(self, faker, num_samples):
+        codes = [c for c, _ in MkMKCurrencyProvider.currencies]
+        names = [n for _, n in MkMKCurrencyProvider.currencies]
+        for _ in range(num_samples):
+            cur = faker.currency()
+            assert isinstance(cur, tuple)
+            assert cur[0] in codes
+            assert cur[1] in names
+
+    def test_currency_name(self, faker, num_samples):
+        names = [n for _, n in MkMKCurrencyProvider.currencies]
+        for _ in range(num_samples):
+            name = faker.currency_name()
+            assert isinstance(name, str)
+            assert name in names
+
+    def test_currency_code(self, faker, num_samples):
+        codes = [c for c, _ in MkMKCurrencyProvider.currencies]
+        for _ in range(num_samples):
+            code = faker.currency_code()
+            assert isinstance(code, str)
+            assert code in codes
