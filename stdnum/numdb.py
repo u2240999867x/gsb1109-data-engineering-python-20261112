@@ -55,19 +55,58 @@ To split the number and get properties for each part:
 >>> pprint.pprint(dbfile.info('1200333'))
 [('1', {'prop1': 'foo'}), ('200', {'prop2': 'bar', 'prop3': 'baz'}), ('333', {'prop4': 'bax'})]
 
+The database can be compiled into a lookup structure that avoids scanning
+all ranges of a level on every query. The compiled database returns the
+same info() and split() results and a single compilation is reused for
+repeated queries:
+
+>>> compiled = dbfile.compile()
+>>> compiled is dbfile.compile()
+True
+>>> compiled.split('01006') == dbfile.split('01006')
+True
+>>> compiled.info('02006') == dbfile.info('02006')
+True
+
+The explain() method additionally exposes the original prefix entries that
+contributed to a part, so compiled results can be traced back to the raw
+database one entry at a time:
+
+>>> part, properties, sources = compiled.explain('02006')[1]
+>>> part, properties
+('200', {'prop2': 'bar', 'prop3': 'baz'})
+>>> len(sources)
+2
+>>> sources[0][1:3]
+('100', '999')
+>>> sources[1][1:3]
+('200', '200')
+
+The uncompiled database remains fully usable on its own through the raw
+prefixes structure and the linear _find() lookup:
+
+>>> NumDB._find('02006', dbfile.prefixes) == dbfile.info('02006')
+True
+
 """
 
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 
 
 TYPE_CHECKING = False
 if TYPE_CHECKING:  # pragma: no cover (only used when type checking)
     from collections.abc import Generator, Iterable
-    from typing import IO, Any
+    from typing import IO, Any, Optional
     PrefixInfo = tuple[int, str, str, dict[str, str], list['PrefixInfo']]
-
+    SourceInfo = tuple[PrefixInfo, ...]
+    Match = tuple[int, dict[str, str], 'CompiledLevel', SourceInfo]
+    LookupTable = tuple[
+        tuple[str, ...], tuple[Optional[str], ...], tuple[dict[str, str], ...],
+        tuple['CompiledLevel', ...], tuple[SourceInfo, ...]]
+    CompileCache = dict[int, tuple['CompiledLevel', list[PrefixInfo]]]
 
 _line_re = re.compile(
     r'^(?P<indent> *)'
@@ -88,19 +127,44 @@ _open_databases = {}
 # (there is no expected ordering within the list)
 
 
+def _successor(value: str) -> str | None:
+    """Return the smallest fixed-length string that sorts after value, or
+    None if value is the largest possible string of its length.
+
+    Strings compare by Unicode code point so incrementing the rightmost
+    code point (carrying left at the maximum code point) yields the
+    successor. Range values only use digits, uppercase letters and '$', but
+    queries may contain other characters, so no smaller alphabet is
+    assumed."""
+    result = list(value)
+    for index in range(len(result) - 1, -1, -1):
+        code = ord(result[index])
+        if code < 0x10FFFF:
+            result[index] = chr(code + 1)
+            return ''.join(result)
+        result[index] = chr(0)
+    return None
+
+
 class NumDB():
     """Number database."""
 
     prefixes: list[PrefixInfo]
+    _compiled: CompiledNumDB | None
 
     def __init__(self) -> None:
         """Construct an empty database."""
         self.prefixes = []
+        self._compiled = None
 
     @staticmethod
     def _find(number: str, prefixes: list[PrefixInfo]) -> list[tuple[str, dict[str, str]]]:
         """Lookup the specified number in the list of prefixes, this will
-        return basically what info() should return but works recursively."""
+        return basically what info() should return but works recursively.
+
+        This is the uncompiled, linear lookup over the raw prefixes
+        structure and is kept as the reference implementation for the
+        compiled lookup."""
         if not number:
             return []
         part = number
@@ -119,16 +183,217 @@ class NumDB():
         # return first part and recursively find next matches
         return [(part, properties)] + NumDB._find(number[len(part):], next_prefixes)
 
+    def compile(self) -> CompiledNumDB:
+        """Return a compiled copy of the database that is optimised for
+        repeated queries. The compilation is done once and the result is
+        cached on the database; the raw prefixes remain available for
+        independent use."""
+        if self._compiled is None:
+            self._compiled = CompiledNumDB(self.prefixes)
+        return self._compiled
+
     def info(self, number: str) -> list[tuple[str, dict[str, str]]]:
         """Split the provided number in components and associate properties
         with each component. This returns a tuple of tuples. Each tuple
         consists of a string (a part of the number) and a dict of properties.
         """
-        return NumDB._find(number, self.prefixes)
+        return self.compile().info(number)
 
     def split(self, number: str) -> list[str]:
         """Split the provided number in components. This returns a tuple with
         the number of components identified."""
+        return [part for part, props in self.info(number)]
+
+
+class CompiledLevel():
+    """A compiled version of a single prefixes list.
+
+    The original entries are grouped by prefix length. For each length the
+    ranges are split into disjoint half-open segments with a constant set of
+    covering ranges; the segments hold the combined properties (with later
+    file entries overriding earlier ones), the merged children and the
+    original prefix entries that explain the segment."""
+
+    lengths: tuple[int, ...]
+    tables: dict[int, LookupTable]
+
+    def __init__(self) -> None:
+        self.lengths = ()
+        self.tables = {}
+
+
+# shared level for empty children lists; the object is immutable so a single
+# instance avoids rebuilding an empty level for every leaf segment
+_empty_level = CompiledLevel()
+
+
+class CompiledNumDB():
+    """Number database compiled for fast repeated lookups.
+
+    Unlike the uncompiled NumDB._find() this does not try every range in a
+    level. Instead each level's ranges are grouped by prefix length and
+    split into disjoint segments that are located with a binary search.
+    Overlapping ranges of the same length keep their original file-order
+    semantics: properties are applied in order and children are merged.
+
+    This is not a longest-prefix match: just like NumDB._find() the shortest
+    matching prefix length wins and any remaining number is looked up in the
+    merged children of that match."""
+
+    _root: CompiledLevel
+
+    def __init__(self, prefixes: list[PrefixInfo]) -> None:
+        """Construct a compiled database from the raw prefixes structure."""
+        cache: CompileCache = {}
+        self._root = self._compile(prefixes, cache)
+
+    @staticmethod
+    def _compile(
+        prefixes: list[PrefixInfo],
+        cache: CompileCache,
+    ) -> CompiledLevel:
+        """Build a CompiledLevel for the specified prefixes list."""
+        if not prefixes:
+            return _empty_level
+        # the same children list may be attached to multiple entries so
+        # compile it only once; the cache value keeps the list alive
+        cached = cache.get(id(prefixes))
+        if cached is not None:
+            return cached[0]
+        level = CompiledLevel()
+        cache[id(prefixes)] = (level, prefixes)
+        # group entries by prefix length
+        grouped: dict[int, list[PrefixInfo]] = {}
+        for entry in prefixes:
+            grouped.setdefault(entry[0], []).append(entry)
+        level.lengths = tuple(sorted(grouped))
+        for length, entries in grouped.items():
+            # turn inclusive ranges into half-open [low, successor(high))
+            # intervals and record where the set of active ranges changes
+            events: list[tuple[str, int, int]] = []
+            for position, entry in enumerate(entries):
+                events.append((entry[1], 1, position))
+                end = _successor(entry[2])
+                if end is not None:
+                    events.append((end, 0, position))
+            # starts are applied before ends at the same coordinate
+            events.sort(key=lambda event: (event[0], -event[1]))
+            starts: list[str] = []
+            ends: list[str | None] = []
+            properties: list[dict[str, str]] = []
+            child_levels: list[CompiledLevel] = []
+            sources: list[SourceInfo] = []
+            active: dict[int, PrefixInfo] = {}
+            index = 0
+            while index < len(events):
+                coord = events[index][0]
+                # apply all ranges starting at this coordinate
+                while index < len(events) and events[index][0] == coord and events[index][1] == 1:
+                    position = events[index][2]
+                    active[position] = entries[position]
+                    index += 1
+                # remove all ranges ending at this coordinate
+                while index < len(events) and events[index][0] == coord:
+                    active.pop(events[index][2], None)
+                    index += 1
+                next_coord = events[index][0] if index < len(events) else None
+                if active:
+                    # the active set is constant over [coord, next_coord);
+                    # apply the covering ranges in original file order
+                    ordered = tuple(active[position] for position in sorted(active))
+                    if len(ordered) == 1:
+                        # reuse the entry's own properties and children so
+                        # single-source segments add no extra copies
+                        props = ordered[0][3]
+                        children = ordered[0][4]
+                    else:
+                        props = {}
+                        for entry in ordered:
+                            props.update(entry[3])
+                        children = CompiledNumDB._merge_children(ordered)
+                    starts.append(coord)
+                    ends.append(next_coord)
+                    properties.append(props)
+                    child_levels.append(
+                        CompiledNumDB._compile(children, cache))
+                    sources.append(ordered)
+            level.tables[length] = (
+                tuple(starts), tuple(ends), tuple(properties),
+                tuple(child_levels), tuple(sources))
+        return level
+
+    @staticmethod
+    def _merge_children(ordered: SourceInfo) -> list[PrefixInfo]:
+        """Concatenate the children of the covering ranges in file order,
+        mirroring the extend() calls in the linear lookup."""
+        children: list[PrefixInfo] = []
+        for entry in ordered:
+            children.extend(entry[4])
+        return children
+
+    @staticmethod
+    def _match(
+        level: CompiledLevel,
+        part: str,
+    ) -> Match | None:
+        """Find the shortest matching segment in the compiled level."""
+        for length in level.lengths:
+            if length > len(part):
+                # all remaining lengths are even longer
+                return None
+            starts, ends, props, child_levels, sources = level.tables[length]
+            prefix = part[:length]
+            position = bisect_right(starts, prefix) - 1
+            if position >= 0:
+                end = ends[position]
+                if end is None or prefix < end:
+                    return length, props[position], child_levels[position], sources[position]
+        return None
+
+    def info(self, number: str) -> list[tuple[str, dict[str, str]]]:
+        """Split the provided number in components and associate properties
+        with each component. This returns the same results as
+        NumDB.info()."""
+        result: list[tuple[str, dict[str, str]]] = []
+        remainder = number
+        level = self._root
+        while remainder:
+            match = self._match(level, remainder)
+            if match is None:
+                # no prefix matches: the leftover is the final empty part
+                result.append((remainder, {}))
+                break
+            length, props, child_level, _sources = match
+            result.append((remainder[:length], dict(props)))
+            remainder = remainder[length:]
+            level = child_level
+        return result
+
+    def explain(
+        self,
+        number: str,
+    ) -> list[tuple[str, dict[str, str], SourceInfo]]:
+        """Like info() but each part is accompanied by the original prefix
+        entries (in file order) that contributed its properties and child
+        levels. This makes it possible to trace compiled results back to the
+        raw database entries."""
+        result: list[tuple[str, dict[str, str], SourceInfo]] = []
+        remainder = number
+        level = self._root
+        while remainder:
+            match = self._match(level, remainder)
+            if match is None:
+                result.append((remainder, {}, ()))
+                break
+            length, props, child_level, sources = match
+            result.append((remainder[:length], dict(props), sources))
+            remainder = remainder[length:]
+            level = child_level
+        return result
+
+    def split(self, number: str) -> list[str]:
+        """Split the provided number in components. This returns the same
+        results as NumDB.split()."""
         return [part for part, props in self.info(number)]
 
 
