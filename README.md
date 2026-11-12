@@ -33,6 +33,20 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Guarded patches
+---------------
+`ColumnPermissions` names protected columns (a column covers everything below
+it) and per-business-row grants for the independent `read`, `write` and
+`reorder` permissions. `GuardedJsonPatch` / `apply_guarded_patch()` authorize
+the whole batch on a private copy before writing anything: the operations are
+replayed so array indices are decoded against the state each one reaches and
+grants follow business row keys rather than positions. A denial raises
+`JsonPatchPermissionDenied`, reporting the first offending operation, its
+protected column and row, and leaves the document unchanged.
+
+See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.html#guarded-patches)
+for examples.
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as

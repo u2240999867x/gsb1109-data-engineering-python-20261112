@@ -38,6 +38,25 @@ class InvalidJsonPatch(JsonPatchException): ...
 class JsonPatchConflict(JsonPatchException): ...
 class JsonPatchPathNotFound(JsonPatchConflict): ...
 class JsonPatchTestFailed(JsonPatchException, AssertionError): ...
+class JsonPatchPermissionDenied(JsonPatchException):
+    index: int
+    column: str
+    permission: str
+    row_key: Any
+    def __init__(
+        self,
+        message: str,
+        *,
+        op: Any,
+        index: int,
+        column: str,
+        permission: str,
+        row_key: Any = ...,
+    ) -> None: ...
+
+PERMISSION_READ: str
+PERMISSION_WRITE: str
+PERMISSION_REORDER: str
 
 def multidict(ordered_pairs: Iterable[tuple[str, Any]]) -> dict[str, Any]: ...
 def apply_patch(
@@ -46,6 +65,13 @@ def apply_patch(
     in_place: bool = False,
     pointer_cls: type[JsonPointer] = ...,
     atomic: bool = False,
+) -> Any: ...
+def apply_guarded_patch(
+    doc: Any,
+    patch: str | bytes | Iterable[_Operation],
+    permissions: ColumnPermissions,
+    in_place: bool = False,
+    pointer_cls: type[JsonPointer] = ...,
 ) -> Any: ...
 def make_patch(
     src: Any,
@@ -92,6 +118,40 @@ class TestOperation(PatchOperation): ...
 class CopyOperation(PatchOperation): ...
 class AppendOperation(PatchOperation): ...
 
+# A single grant rule, e.g.
+# {'permission': 'write', 'column': '/rows/0/ssn', 'rows': [1]}
+_Grant = Mapping[str, Any]
+
+class ColumnPermissions:
+    READ: ClassVar[str]
+    WRITE: ClassVar[str]
+    REORDER: ClassVar[str]
+    row_key: str
+    pointer_cls: type[JsonPointer]
+    def __init__(
+        self,
+        protected: Iterable[str | JsonPointer] = ...,
+        grants: Iterable[_Grant] = ...,
+        row_key: str = ...,
+        pointer_cls: type[JsonPointer] = ...,
+    ) -> None: ...
+    def grant(
+        self,
+        permission: str,
+        column: str | JsonPointer,
+        rows: Iterable[Any] = ...,
+    ) -> None: ...
+    def is_protected(self, parts: Iterable[str]) -> bool: ...
+    def is_reorder_controlled(self, parts: Iterable[str]) -> bool: ...
+    def protected_columns_under(self, parts: Iterable[str]) -> list[tuple[str, ...]]: ...
+    def permits(
+        self,
+        permission: str,
+        parts: Iterable[str],
+        row_key: Any = ...,
+    ) -> bool: ...
+    def business_key(self, element: Any) -> Any: ...
+
 class JsonPatch:
     json_dumper: ClassVar[Callable[..., str]]
     json_loader: ClassVar[Callable[..., Any]]
@@ -122,6 +182,23 @@ class JsonPatch:
     ) -> Self: ...
     def to_string(self, dumps: Callable[[Any], str] | None = None) -> str: ...
     def apply(self, obj: Any, in_place: bool = False, atomic: bool = False) -> Any: ...
+
+class GuardedJsonPatch(JsonPatch):
+    permissions: ColumnPermissions
+    def __init__(
+        self,
+        patch: Iterable[_Operation],
+        permissions: ColumnPermissions,
+        pointer_cls: type[JsonPointer] = ...,
+    ) -> None: ...
+    @classmethod
+    def from_string(
+        cls,
+        patch_str: str | bytes | bytearray,
+        loads: Callable[[Any], Any] | None = ...,
+        pointer_cls: type[JsonPointer] = ...,
+        permissions: ColumnPermissions | None = ...,
+    ) -> Self: ...
 
 class JsonPatchWithAppend(JsonPatch): ...
 

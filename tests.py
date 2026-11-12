@@ -4051,6 +4051,433 @@ class StandardAppendIsolationTests(unittest.TestCase):
                          {'message': 'canonical'})
 
 
+class GuardedPatchTests(unittest.TestCase):
+    """Whole-batch preflight of GuardedJsonPatch / ColumnPermissions."""
+
+    # Sentinel for "no business row key is asserted on this denial"
+    NO_ROW_KEY = object()
+
+    def setUp(self):
+        self.doc = {'rows': [
+            {'id': 1, 'name': 'Alice', 'ssn': '111', 'note': 'open'},
+            {'id': 2, 'name': 'Bob', 'ssn': '222', 'note': 'open'},
+            {'id': 3, 'name': 'Cara', 'ssn': '333', 'note': 'open'},
+        ]}
+        self.ssn_columns = ['/rows/0/ssn', '/rows/1/ssn', '/rows/2/ssn']
+
+    def permissions(self, grants=(), protected=None, row_key='id'):
+        return jsonpatch.ColumnPermissions(
+            protected=self.ssn_columns if protected is None else protected,
+            grants=list(grants), row_key=row_key)
+
+    def assertDenied(self, doc, operations, permissions, *, index, column,
+                     permission, row_key=NO_ROW_KEY, in_place=False):
+        with self.assertRaises(jsonpatch.JsonPatchPermissionDenied) as caught:
+            jsonpatch.apply_guarded_patch(doc, operations, permissions,
+                                          in_place=in_place)
+        error = caught.exception
+        self.assertIsInstance(error, jsonpatch.JsonPatchException)
+        self.assertEqual(error.index, index)
+        self.assertEqual(error.column, column)
+        self.assertEqual(error.permission, permission)
+        self.assertEqual(error.op.operation, operations[index])
+        if row_key is not self.NO_ROW_KEY:
+            self.assertEqual(error.row_key, row_key)
+        return error
+
+    def test_open_columns_are_writable_without_grants(self):
+        result = jsonpatch.apply_guarded_patch(
+            self.doc, [{'op': 'replace', 'path': '/rows/1/note',
+                        'value': 'patched'}], self.permissions())
+        # The protected content and the business row stay exactly as they were
+        self.assertEqual(result['rows'][1]['ssn'], '222')
+        self.assertEqual(result['rows'][1]['id'], 2)
+        self.assertEqual(result['rows'][1]['note'], 'patched')
+
+    def test_protected_column_write_is_denied_and_reports_first_offender(self):
+        operations = [
+            {'op': 'replace', 'path': '/rows/0/note', 'value': 'ok'},
+            {'op': 'replace', 'path': '/rows/1/ssn', 'value': '000'},
+        ]
+        self.assertDenied(self.doc, operations, self.permissions(),
+                          index=1, column='/rows/1/ssn',
+                          permission='write', row_key=2)
+
+    def test_denied_batch_persists_nothing_in_place(self):
+        doc = copy.deepcopy(self.doc)
+        operations = [
+            {'op': 'replace', 'path': '/rows/0/note', 'value': 'legal'},
+            {'op': 'replace', 'path': '/rows/2/ssn', 'value': 'leak'},
+        ]
+        self.assertDenied(doc, operations, self.permissions(),
+                          index=1, column='/rows/2/ssn',
+                          permission='write', row_key=3, in_place=True)
+        self.assertEqual(doc, self.doc)
+
+    def test_read_write_and_reorder_permissions_are_independent(self):
+        write_only = self.permissions([
+            {'permission': 'write', 'column': '/rows'}])
+        self.assertDenied(self.doc,
+                          [{'op': 'test', 'path': '/rows/0/ssn',
+                            'value': '111'}], write_only,
+                          index=0, column='/rows/0/ssn',
+                          permission='read', row_key=1)
+        self.assertDenied(self.doc,
+                          [{'op': 'remove', 'path': '/rows/0'}], write_only,
+                          index=0, column='/rows', permission='reorder',
+                          row_key=1)
+
+        read_only = self.permissions([
+            {'permission': 'read', 'column': '/rows', 'rows': [1]}])
+        self.assertDenied(self.doc,
+                          [{'op': 'replace', 'path': '/rows/0/ssn',
+                            'value': 'x'}], read_only,
+                          index=0, column='/rows/0/ssn',
+                          permission='write', row_key=1)
+
+    def test_grant_on_ancestor_column_covers_descendants(self):
+        permissions = self.permissions([
+            {'permission': 'write', 'column': '/rows/0', 'rows': [1]}])
+        result = jsonpatch.apply_guarded_patch(
+            self.doc, [{'op': 'replace', 'path': '/rows/0/ssn',
+                        'value': 'z'}], permissions)
+        self.assertEqual(result['rows'][0]['ssn'], 'z')
+
+    def test_unscoped_grant_covers_every_business_row(self):
+        permissions = self.permissions([
+            {'permission': 'write', 'column': '/rows'}])
+        result = jsonpatch.apply_guarded_patch(
+            self.doc, [{'op': 'replace', 'path': '/rows/2/ssn',
+                        'value': 'z'}], permissions)
+        self.assertEqual(result['rows'][2]['ssn'], 'z')
+
+    def test_index_shift_does_not_transfer_grant_between_rows(self):
+        # The grant only covers business row 1. After removing row 1, index 0
+        # is occupied by row 2, whose ssn must remain protected.
+        permissions = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'},
+            {'permission': 'write', 'column': '/rows', 'rows': [1]},
+        ])
+        operations = [
+            {'op': 'remove', 'path': '/rows/0'},
+            {'op': 'replace', 'path': '/rows/0/ssn', 'value': '9'},
+        ]
+        self.assertDenied(self.doc, operations, permissions,
+                          index=1, column='/rows/0/ssn',
+                          permission='write', row_key=2)
+
+    def test_grant_follows_business_row_after_index_shift(self):
+        permissions = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'},
+            {'permission': 'write', 'column': '/rows', 'rows': [1, 2]},
+        ])
+        result = jsonpatch.apply_guarded_patch(self.doc, [
+            {'op': 'remove', 'path': '/rows/0'},
+            {'op': 'replace', 'path': '/rows/0/ssn', 'value': '9'},
+        ], permissions)
+        self.assertEqual([row['id'] for row in result['rows']], [2, 3])
+        self.assertEqual(result['rows'][0]['ssn'], '9')
+
+    def test_reorder_grant_needed_for_insert_and_remove(self):
+        no_reorder = self.permissions([
+            {'permission': 'write', 'column': '/rows', 'rows': [1]}])
+        self.assertDenied(self.doc,
+                          [{'op': 'remove', 'path': '/rows/0'}], no_reorder,
+                          index=0, column='/rows', permission='reorder',
+                          row_key=1)
+        self.assertDenied(self.doc,
+                          [{'op': 'add', 'path': '/rows/0',
+                            'value': {'id': 9}}], no_reorder,
+                          index=0, column='/rows', permission='reorder')
+
+    def test_appending_an_open_row_only_needs_reorder(self):
+        permissions = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'}])
+        result = jsonpatch.apply_guarded_patch(self.doc, [
+            {'op': 'add', 'path': '/rows/-',
+             'value': {'id': 7, 'name': 'New', 'note': 'o'}},
+        ], permissions)
+        self.assertEqual([row['id'] for row in result['rows']], [1, 2, 3, 7])
+
+    def test_inserting_a_protected_column_needs_write_for_its_own_row(self):
+        protected = self.ssn_columns + ['/rows/3/ssn']
+        permissions = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'}], protected=protected)
+        self.assertDenied(self.doc, [
+            {'op': 'add', 'path': '/rows/-',
+             'value': {'id': 7, 'ssn': 'secret'}},
+        ], permissions, index=0, column='/rows/3/ssn',
+            permission='write', row_key=7)
+
+        granted = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'},
+            {'permission': 'write', 'column': '/rows', 'rows': [7]},
+        ], protected=protected)
+        result = jsonpatch.apply_guarded_patch(self.doc, [
+            {'op': 'add', 'path': '/rows/-',
+             'value': {'id': 7, 'ssn': 'secret'}},
+        ], granted)
+        self.assertEqual(result['rows'][-1]['ssn'], 'secret')
+
+    def test_test_operation_requires_read_permission(self):
+        self.assertDenied(self.doc,
+                          [{'op': 'test', 'path': '/rows/0/ssn',
+                            'value': '111'}], self.permissions(),
+                          index=0, column='/rows/0/ssn',
+                          permission='read', row_key=1)
+
+    def test_granted_test_still_enforces_its_value(self):
+        permissions = self.permissions([
+            {'permission': 'read', 'column': '/rows/0/ssn', 'rows': [1]}])
+        with self.assertRaises(jsonpatch.JsonPatchTestFailed):
+            jsonpatch.apply_guarded_patch(
+                self.doc, [{'op': 'test', 'path': '/rows/0/ssn',
+                            'value': 'wrong'}], permissions)
+
+    def test_testing_a_container_checks_its_protected_columns(self):
+        row = self.doc['rows'][0]
+        # Reading the whole row exposes its protected ssn column
+        self.assertDenied(self.doc,
+                          [{'op': 'test', 'path': '/rows/0', 'value': row}],
+                          self.permissions(), index=0,
+                          column='/rows/0/ssn', permission='read', row_key=1)
+        # And so does testing the whole document
+        self.assertDenied(self.doc,
+                          [{'op': 'test', 'path': '', 'value': self.doc}],
+                          self.permissions(), index=0,
+                          column='/rows/0/ssn', permission='read')
+        granted = self.permissions([
+            {'permission': 'read', 'column': '/rows/0/ssn', 'rows': [1]}])
+        jsonpatch.apply_guarded_patch(
+            self.doc, [{'op': 'test', 'path': '/rows/0', 'value': row}],
+            granted)
+
+    def test_unknown_operation_fails_closed(self):
+        class CustomOperation(jsonpatch.PatchOperation):
+            def _apply(self, obj, journal):
+                return obj
+
+        class CustomGuardedPatch(jsonpatch.GuardedJsonPatch):
+            operations = MappingProxyType(dict(
+                jsonpatch.JsonPatch.operations, custom=CustomOperation))
+
+        with self.assertRaises(jsonpatch.InvalidJsonPatch):
+            CustomGuardedPatch(
+                [{'op': 'custom', 'path': '/rows/0/ssn'}],
+                self.permissions()).apply(self.doc)
+
+    def test_copy_source_requires_read_and_destination_write(self):
+        operations = [{'op': 'copy', 'from': '/rows/0/ssn',
+                       'path': '/rows/0/note'}]
+        self.assertDenied(self.doc, operations, self.permissions(),
+                          index=0, column='/rows/0/ssn',
+                          permission='read', row_key=1)
+
+        allowed = self.permissions([
+            {'permission': 'read', 'column': '/rows/0/ssn', 'rows': [1]}])
+        result = jsonpatch.apply_guarded_patch(self.doc, operations, allowed)
+        self.assertEqual(result['rows'][0]['note'], '111')
+
+    def test_copying_a_row_checks_every_protected_column_inside_it(self):
+        permissions = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'}])
+        self.assertDenied(self.doc, [
+            {'op': 'copy', 'from': '/rows/0', 'path': '/rows/-'},
+        ], permissions, index=0, column='/rows/0/ssn',
+            permission='read', row_key=1)
+
+    def test_move_requires_read_write_and_reorder(self):
+        operations = [{'op': 'move', 'from': '/rows/0',
+                       'path': '/rows/-'}]
+        reorder_only = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'}])
+        self.assertDenied(self.doc, operations, reorder_only,
+                          index=0, column='/rows/0/ssn',
+                          permission='read', row_key=1)
+
+        granted = self.permissions([
+            {'permission': 'reorder', 'column': '/rows'},
+            {'permission': 'read', 'column': '/rows', 'rows': [1]},
+            {'permission': 'write', 'column': '/rows', 'rows': [1]},
+        ])
+        result = jsonpatch.apply_guarded_patch(self.doc, operations, granted)
+        self.assertEqual([row['id'] for row in result['rows']], [2, 3, 1])
+
+    def test_whole_row_replacement_checks_actual_overwritten_columns(self):
+        # The new value still carries the protected column
+        self.assertDenied(self.doc, [
+            {'op': 'replace', 'path': '/rows/0',
+             'value': {'id': 1, 'name': 'Z', 'ssn': '999'}},
+        ], self.permissions(), index=0, column='/rows/0/ssn',
+            permission='write', row_key=1)
+
+        # Dropping the protected key still overwrites the old protected value
+        self.assertDenied(self.doc, [
+            {'op': 'replace', 'path': '/rows/0',
+             'value': {'id': 1, 'name': 'Z'}},
+        ], self.permissions(), index=0, column='/rows/0/ssn',
+            permission='write', row_key=1)
+
+    def test_root_replacement_checks_every_protected_column_it_covers(self):
+        self.assertDenied(self.doc, [
+            {'op': 'replace', 'path': '', 'value': {'rows': []}},
+        ], self.permissions(), index=0, column='/rows/0/ssn',
+            permission='write', row_key=1)
+
+    def test_replacement_only_checks_columns_present_on_either_side(self):
+        # The old element has no ssn column, and the new value has none either,
+        # so replacing this open row needs no protected-column write grant.
+        doc = {'rows': [{'id': 9, 'name': 'open'}]}
+        result = jsonpatch.apply_guarded_patch(doc, [
+            {'op': 'replace', 'path': '/rows/0',
+             'value': {'id': 9, 'name': 'changed'}},
+        ], self.permissions())
+        self.assertEqual(result['rows'][0]['name'], 'changed')
+
+    def test_add_over_existing_member_checks_the_old_protected_columns(self):
+        doc = {'rows': [{'id': 1, 'profile': {'ssn': 'p', 'open': 'x'}}]}
+        protected = ['/rows/0/profile/ssn']
+        # Dropping the protected member via an add still destroys its old value
+        self.assertDenied(doc, [
+            {'op': 'add', 'path': '/rows/0/profile',
+             'value': {'open': 'y'}},
+        ], jsonpatch.ColumnPermissions(protected=protected),
+            index=0, column='/rows/0/profile/ssn',
+            permission='write', row_key=1)
+
+        granted = jsonpatch.ColumnPermissions(
+            protected=protected, grants=[
+                {'permission': 'write', 'column': '/rows/0/profile',
+                 'rows': [1]}])
+        result = jsonpatch.apply_guarded_patch(doc, [
+            {'op': 'add', 'path': '/rows/0/profile',
+             'value': {'ssn': 'q', 'open': 'y'}},
+        ], granted)
+        self.assertEqual(result['rows'][0]['profile']['ssn'], 'q')
+        # A genuinely new, open member needs no grant
+        result = jsonpatch.apply_guarded_patch(doc, [
+            {'op': 'add', 'path': '/rows/0/extra', 'value': 1},
+        ], jsonpatch.ColumnPermissions(protected=protected))
+        self.assertEqual(result['rows'][0]['extra'], 1)
+
+    def test_custom_row_key_member(self):
+        doc = {'items': [{'sku': 'S-1', 'code': 'x'},
+                         {'sku': 'S-2', 'code': 'y'}]}
+        permissions = jsonpatch.ColumnPermissions(
+            protected=['/items/0/code', '/items/1/code'], row_key='sku',
+            grants=[{'permission': 'write', 'column': '/items',
+                     'rows': ['S-2']}])
+        self.assertDenied(doc,
+                          [{'op': 'replace', 'path': '/items/0/code',
+                            'value': 'z'}], permissions,
+                          index=0, column='/items/0/code',
+                          permission='write', row_key='S-1')
+        result = jsonpatch.apply_guarded_patch(
+            doc, [{'op': 'replace', 'path': '/items/1/code',
+                   'value': 'z'}], permissions)
+        self.assertEqual(result['items'][1]['code'], 'z')
+
+    def test_none_is_a_valid_business_row_key(self):
+        doc = {'rows': [{'id': None, 'ssn': 'p'},
+                        {'id': 0, 'ssn': 'q'}]}
+        protected = ['/rows/0/ssn', '/rows/1/ssn']
+        permissions = jsonpatch.ColumnPermissions(
+            protected=protected,
+            grants=[{'permission': 'write', 'column': '/rows',
+                     'rows': [None]}])
+        result = jsonpatch.apply_guarded_patch(
+            doc, [{'op': 'replace', 'path': '/rows/0/ssn',
+                   'value': 'z'}], permissions)
+        self.assertEqual(result['rows'][0]['ssn'], 'z')
+        self.assertDenied(doc,
+                          [{'op': 'replace', 'path': '/rows/1/ssn',
+                            'value': 'z'}], permissions,
+                          index=0, column='/rows/1/ssn',
+                          permission='write', row_key=0)
+
+    def test_nested_array_reorder_is_scoped_per_array(self):
+        doc = {'teams': [
+            {'tid': 10, 'members': [{'id': 1, 'ssn': 'a'},
+                                    {'id': 2, 'ssn': 'b'}]},
+            {'tid': 20, 'members': [{'id': 3, 'ssn': 'c'},
+                                    {'id': 4, 'ssn': 'd'}]},
+        ]}
+        protected = ['/teams/0/members/0/ssn', '/teams/0/members/1/ssn',
+                     '/teams/1/members/0/ssn', '/teams/1/members/1/ssn']
+        permissions = jsonpatch.ColumnPermissions(
+            protected=protected, grants=[
+                {'permission': 'reorder', 'column': '/teams/0/members'},
+                {'permission': 'read', 'column': '/teams/0/members',
+                 'rows': [1, 2]},
+                {'permission': 'write', 'column': '/teams/0/members',
+                 'rows': [1, 2]},
+            ])
+        result = jsonpatch.apply_guarded_patch(doc, [
+            {'op': 'move', 'from': '/teams/0/members/0',
+             'path': '/teams/0/members/-'},
+        ], permissions)
+        self.assertEqual([m['id'] for m in result['teams'][0]['members']],
+                         [2, 1])
+        self.assertDenied(doc, [
+            {'op': 'move', 'from': '/teams/1/members/0',
+             'path': '/teams/1/members/-'},
+        ], permissions, index=0,
+            column='/teams/1/members/0/ssn', permission='read', row_key=3)
+
+    def test_policy_and_patch_validation(self):
+        with self.assertRaises(TypeError):
+            jsonpatch.GuardedJsonPatch([], {'not': 'a policy'})
+        with self.assertRaises(ValueError):
+            jsonpatch.ColumnPermissions(protected=['not-a-pointer'])
+        with self.assertRaises(ValueError):
+            jsonpatch.ColumnPermissions(
+                grants=[{'permission': 'admin', 'column': '/a'}])
+        with self.assertRaises(jsonpatch.InvalidJsonPatch):
+            jsonpatch.GuardedJsonPatch(
+                [{'op': 'append', 'path': '/x', 'value': '!'}],
+                self.permissions())
+
+    def test_from_string_and_module_helper(self):
+        permissions = self.permissions([
+            {'permission': 'write', 'column': '/rows/0/ssn', 'rows': [1]}])
+        patch = jsonpatch.GuardedJsonPatch.from_string(
+            '[{"op":"replace","path":"/rows/0/ssn","value":"z"}]',
+            permissions=permissions)
+        self.assertEqual(patch.apply(self.doc)['rows'][0]['ssn'], 'z')
+        result = jsonpatch.apply_guarded_patch(
+            self.doc,
+            '[{"op":"replace","path":"/rows/1/note","value":"q"}]',
+            self.permissions())
+        self.assertEqual(result['rows'][1]['note'], 'q')
+
+    def test_structural_conflicts_still_raise_and_leave_document_untouched(self):
+        doc = copy.deepcopy(self.doc)
+        with self.assertRaises(jsonpointer.JsonPointerException):
+            jsonpatch.apply_guarded_patch(doc, [
+                {'op': 'remove', 'path': '/rows/9/ssn'},
+            ], self.permissions(), in_place=True)
+        with self.assertRaises(jsonpatch.JsonPatchPathNotFound):
+            jsonpatch.apply_guarded_patch(doc, [
+                {'op': 'remove', 'path': '/rows/0/missing'},
+            ], self.permissions(), in_place=True)
+        self.assertEqual(doc, self.doc)
+
+    def test_guarded_subclass_supports_append_operation(self):
+        class GuardedAppendPatch(jsonpatch.GuardedJsonPatch):
+            operations = MappingProxyType(dict(
+                jsonpatch.JsonPatch.operations,
+                append=jsonpatch.AppendOperation))
+
+        result = GuardedAppendPatch(
+            [{'op': 'append', 'path': '/rows/0/note', 'value': '!'}],
+            self.permissions()).apply(self.doc)
+        self.assertEqual(result['rows'][0]['note'], 'open!')
+        with self.assertRaises(jsonpatch.JsonPatchPermissionDenied):
+            GuardedAppendPatch(
+                [{'op': 'append', 'path': '/rows/0/ssn', 'value': '!'}],
+                self.permissions()).apply(self.doc)
+
+
 def load_tests(loader, tests, pattern):
     """ Adds the doctests of jsonpatch to the tests of this module """
     tests.addTests(doctest.DocTestSuite(jsonpatch))

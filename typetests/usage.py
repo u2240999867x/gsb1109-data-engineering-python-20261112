@@ -19,7 +19,8 @@ from typing_extensions import assert_type
 import jsonpatch
 from jsonpatch import (InvalidJsonPatch, JsonPatch, JsonPatchConflict,
                        JsonPatchException, JsonPatchPathNotFound,
-                       JsonPatchTestFailed,
+                       JsonPatchPermissionDenied, JsonPatchTestFailed,
+                       ColumnPermissions, GuardedJsonPatch,
                        PatchOperation)
 
 doc = {'foo': 'bar'}
@@ -133,11 +134,47 @@ except jsonpatch.JsonPointerException as ex:
     assert_type(ex, jsonpointer.JsonPointerException)
 assert_type(jsonpatch.JsonPointer('/a'), jsonpointer.JsonPointer)
 
+# guarded patches and column permissions
+permissions = jsonpatch.ColumnPermissions(
+    protected=['/rows/0/ssn'],
+    grants=[{'permission': jsonpatch.PERMISSION_WRITE, 'column': '/rows/0',
+             'rows': [1]}],
+)
+assert_type(permissions, ColumnPermissions)
+assert_type(permissions.row_key, str)
+permissions.grant(jsonpatch.PERMISSION_READ, '/rows/0/ssn', rows=[1])
+permissions.grant(jsonpatch.PERMISSION_REORDER, '/rows')
+assert_type(permissions.permits(jsonpatch.PERMISSION_WRITE, ('rows', '0')), bool)
+assert_type(permissions.is_protected(('rows', '0', 'ssn')), bool)
+assert_type(permissions.is_reorder_controlled(('rows',)), bool)
+assert_type(permissions.business_key({'id': 1}), Any)
+
+guarded = GuardedJsonPatch(ops, permissions)
+assert_type(guarded, GuardedJsonPatch)
+assert_type(guarded.permissions, ColumnPermissions)
+assert_type(guarded.apply(doc), Any)
+assert_type(GuardedJsonPatch.from_string(json.dumps(ops),
+                                         permissions=permissions), GuardedJsonPatch)
+assert_type(jsonpatch.apply_guarded_patch(doc, ops, permissions), Any)
+assert_type(
+    jsonpatch.apply_guarded_patch(doc, json.dumps(ops), permissions,
+                                  in_place=True), Any)
+
+try:
+    guarded.apply(doc)
+except JsonPatchPermissionDenied as denied:
+    assert_type(denied, JsonPatchPermissionDenied)
+    assert_type(denied.index, int)
+    assert_type(denied.column, str)
+    assert_type(denied.permission, str)
+    assert_type(denied.row_key, Any)
+
 # wrong usage is rejected
 jsonpatch.apply_patch(doc, ops, in_place='yes')  # type: ignore[arg-type]
 jsonpatch.make_patch(doc)  # type: ignore[call-arg]
 JsonPatch(ops).to_string(dumps=len)  # type: ignore[arg-type]
 JsonPatch([1, 2])  # type: ignore[list-item]
 JsonPatch(ops, pointer_cls=str)  # type: ignore[arg-type]
+GuardedJsonPatch(ops, permissions, pointer_cls=str)  # type: ignore[arg-type]
 # apply_patch treats a bytearray as a sequence of operations, and fails
 jsonpatch.apply_patch(doc, bytearray(b'[]'))  # type: ignore[arg-type]

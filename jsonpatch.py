@@ -116,6 +116,25 @@ class JsonPatchTestFailed(JsonPatchException, AssertionError):
     """ A Test operation failed """
 
 
+class JsonPatchPermissionDenied(JsonPatchException):
+    """Raised by the preflight of :class:`GuardedJsonPatch` when an operation
+    touches a protected column without a grant for the required permission.
+
+    The whole batch is checked before anything is written, so raising this
+    leaves the target document untouched. The offending operation is attached
+    like for the other exceptions, and :attr:`index` is its position in the
+    batch (the first operation that has to be rejected).
+    """
+
+    def __init__(self, message, *, op, index, column, permission,
+                 row_key=None):
+        super().__init__(message, op=op)
+        self.index = index
+        self.column = column
+        self.permission = permission
+        self.row_key = row_key
+
+
 def multidict(ordered_pairs):
     """Convert duplicate keys values to lists."""
     # read all values into lists
@@ -1752,3 +1771,610 @@ def _to_existing_last(pointer, doc):
         raise JsonPointerException("invalid array index '{0}'".format(part))
 
     return subobj, part
+
+
+# Permissions checked by the guarded patch preflight. Reading a value
+# (test/copy/from), changing a column and reordering array rows are granted
+# separately, so a grant for one of them never implies another.
+PERMISSION_READ = 'read'
+PERMISSION_WRITE = 'write'
+PERMISSION_REORDER = 'reorder'
+
+_PERMISSIONS = (PERMISSION_READ, PERMISSION_WRITE, PERMISSION_REORDER)
+
+# A row key that could not be resolved, e.g. because the location is not an
+# array element or the element has no row key member. Distinct from None,
+# which is a valid JSON value and therefore a valid row key.
+_UNRESOLVED = object()
+
+# A value that does not exist at the location a pointer resolves to.
+_MISSING = object()
+
+# Stands for every business row, used when a grant does not name rows.
+_ALL_ROWS = object()
+
+
+class ColumnPermissions:
+    """The protected columns and the grants of a guarded JSON Patch.
+
+    A *column* is the location of a value, given as a JSON Pointer such as
+    ``'/rows/0/ssn'``. A column is protected together with all columns below
+    it. Permissions are granted per column and per business row; the business
+    row of an array element is the value of its ``row_key`` member (``'id'``
+    by default).
+
+    The three permissions are independent:
+
+    * ``'read'`` is needed to read a value, namely for ``test`` and for the
+      ``from`` of ``move`` and ``copy`` (including every protected column the
+      read value contains);
+    * ``'write'`` is needed to add, remove, replace or move a value at a
+      protected column, including the protected columns overwritten by a
+      whole-object replacement;
+    * ``'reorder'`` is needed to insert into or remove from an array, which
+      shifts the positions of its rows.
+
+    A grant on a column also covers the columns below it. Grants whose rows
+    are not restricted (``rows`` omitted) apply to every business row;
+    otherwise they apply only to the named row keys.
+
+    :param protected: Column paths that may only be touched with a grant.
+    :type protected: Iterable[str | JsonPointer]
+
+    :param grants: Grant rules, each a mapping with the keys ``'permission'``,
+                   ``'column'`` and optionally ``'rows'``.
+    :type grants: Iterable[Mapping]
+
+    :param row_key: The object member naming the business row key of an array
+                    element.
+    :type row_key: str
+
+    :param pointer_cls: JSON pointer class used to parse column paths.
+    :type pointer_cls: Type[JsonPointer]
+    """
+
+    READ = PERMISSION_READ
+    WRITE = PERMISSION_WRITE
+    REORDER = PERMISSION_REORDER
+
+    def __init__(self, protected=(), grants=(), row_key='id',
+                 pointer_cls=JsonPointer):
+        self.row_key = row_key
+        self.pointer_cls = pointer_cls
+        # Sorted so the first protected column a denial reports is
+        # deterministic, following document (pointer) order.
+        self._protected = tuple(sorted(
+            self._parts(column) for column in protected))
+        self._grants = {permission: [] for permission in _PERMISSIONS}
+        for rule in grants or ():
+            self.grant(
+                rule['permission'], rule['column'],
+                rule.get('rows', _ALL_ROWS),
+            )
+
+    def _parts(self, column):
+        if isinstance(column, JsonPointer):
+            return tuple(column.parts)
+        try:
+            return tuple(self.pointer_cls(column).parts)
+        except (TypeError, JsonPointerException) as ex:
+            raise ValueError(
+                "Invalid column path {0!r}".format(column)) from ex
+
+    def grant(self, permission, column, rows=_ALL_ROWS):
+        """Adds a grant of ``permission`` on ``column``.
+
+        ``rows`` is an iterable of business row keys, or omitted to grant the
+        permission for every row.
+        """
+        if permission not in self._grants:
+            raise ValueError(
+                "Unknown permission {0!r}; expected one of {1}".format(
+                    permission, ', '.join(_PERMISSIONS)))
+        allowed = _ALL_ROWS if rows is _ALL_ROWS else tuple(rows)
+        self._grants[permission].append((self._parts(column), allowed))
+
+    def is_protected(self, parts):
+        """Whether any protected column is the location ``parts`` itself or an
+        ancestor of it."""
+        parts = tuple(parts)
+        return any(parts[:len(column)] == column
+                   for column in self._protected)
+
+    def is_reorder_controlled(self, parts):
+        """Whether the array at ``parts`` has a protected column at or below
+        it, so inserting or removing its elements needs a reorder grant.
+
+        This is independent of :meth:`is_protected`: an open array that holds
+        protected rows is order-controlled even though the array location
+        itself is not a protected column, so row-order and column-write grants
+        stay separate.
+        """
+        parts = tuple(parts)
+        depth = len(parts)
+        return any(column[:depth] == parts for column in self._protected)
+
+    def protected_columns_under(self, parts):
+        """The protected columns strictly below the location ``parts``."""
+        parts = tuple(parts)
+        depth = len(parts)
+        return [column for column in self._protected
+                if len(column) > depth and column[:depth] == parts]
+
+    def permits(self, permission, parts, row_key=_UNRESOLVED):
+        """Whether ``permission`` on the location ``parts`` is granted for the
+        business row ``row_key``. A grant on the location or one of its
+        ancestors, on the row or on every row, is sufficient."""
+        parts = tuple(parts)
+        for column, allowed in self._grants[permission]:
+            if parts[:len(column)] != column:
+                continue
+            if allowed is _ALL_ROWS or row_key is _ALL_ROWS:
+                return True
+            if row_key is not _UNRESOLVED and row_key in allowed:
+                return True
+        return False
+
+    def business_key(self, element):
+        """The business row key of an array element, or ``_UNRESOLVED`` if it
+        is not an object with a row key member."""
+        if isinstance(element, Mapping) and self.row_key in element:
+            return element[self.row_key]
+        return _UNRESOLVED
+
+
+class _PatchPreflight:
+    """Checks a whole patch against a :class:`ColumnPermissions` policy before
+    anything is written.
+
+    The operations are replayed on a private copy of the document, so array
+    indices always resolve against the state the real application will reach,
+    and the business row behind every index is identified by its row key
+    rather than by the index itself. Removing or moving an earlier array
+    element therefore cannot transfer a grant to the row that shifts into its
+    index.
+    """
+
+    def __init__(self, doc, permissions, pointer_cls=JsonPointer):
+        self.working = copy.deepcopy(doc)
+        self.permissions = permissions
+        self.pointer_cls = pointer_cls
+
+    def run(self, operations):
+        for index, operation in enumerate(operations):
+            self._check(operation, index)
+            # Replay the operation so the indices of the operations after it
+            # resolve against the same state as in the real application.
+            self.working = operation.apply(self.working)
+
+    def _path(self, parts):
+        return path_join(parts, self.pointer_cls)
+
+    def _try_get(self, subobj, part):
+        """Returns the value at ``part`` of ``subobj``, or ``_MISSING`` if the
+        location does not exist. The actual application then raises the
+        canonical conflict, so the preflight only has to authorize locations
+        that really exist."""
+        if part is None:
+            # The empty pointer selects the whole document
+            return subobj
+        try:
+            return subobj[part]
+        except (KeyError, IndexError, TypeError):
+            return _MISSING
+
+    def _array_insertion(self, pointer, removed_from=None):
+        """For an insertion into an array, returns the concrete landing parts
+        and the business key of the row pushed back.
+
+        The last token of an array pointer can be ``'-'`` or an insertion
+        index; it is decoded into the index the inserted element really
+        occupies. ``removed_from`` is ``(container parts, index)`` of a value
+        that leaves the same array first, as for a ``move``: both the landing
+        index and the displaced row are then resolved against the shortened
+        array. Returns ``None`` when the target is not an array.
+        """
+        parts = tuple(pointer.parts)
+        subobj, part = pointer.to_last(self.working)
+        if not isinstance(subobj, MutableSequence):
+            return None
+
+        source_index = None
+        if removed_from is not None:
+            container_parts, removed_index = removed_from
+            if tuple(container_parts) == tuple(parts[:-1]) \
+                    and isinstance(removed_index, int):
+                source_index = removed_index
+
+        length = len(subobj)
+        if part == '-':
+            # After a removal the array is one element shorter, so appending
+            # lands at its last (rather than one-past-last) index.
+            landing = length - (1 if source_index is not None else 0)
+            displaced = _UNRESOLVED
+        elif isinstance(part, int):
+            # The target index is evaluated against the array the add really
+            # runs on, which is the shortened one for a move, so the landing
+            # index is the token itself.
+            landing = part
+            # The post-removal element at ``landing`` comes from pre-removal
+            # index ``landing`` before the source or ``landing + 1`` after it.
+            if source_index is None or landing < source_index:
+                displaced_pre = landing
+            else:
+                displaced_pre = landing + 1
+            if 0 <= displaced_pre < length:
+                displaced = self.permissions.business_key(
+                    subobj[displaced_pre])
+            else:
+                displaced = _UNRESOLVED
+        else:
+            # An invalid array index; the real application rejects it
+            return parts, _UNRESOLVED
+
+        return parts[:-1] + (str(landing),), displaced
+
+    def _resolve(self, parts):
+        if not parts:
+            return self.working
+        return self.pointer_cls(self._path(parts)).resolve(self.working)
+
+    def _row_key(self, parts):
+        """The business row key of the array element located by ``parts``,
+        walking up to the nearest array element if it is a member inside one.
+        """
+        for depth in range(len(parts) - 1, -1, -1):
+            token = parts[depth]
+            if not isinstance(token, str) or not token.lstrip('-').isdigit():
+                continue
+            try:
+                container = self._resolve(parts[:depth])
+            except JsonPointerException:
+                return _UNRESOLVED
+            if not isinstance(container, MutableSequence):
+                continue
+            index = int(token)
+            if 0 <= index < len(container):
+                return self.permissions.business_key(container[index])
+            return _UNRESOLVED
+        return _UNRESOLVED
+
+    def _denied(self, index, operation, parts, permission, row_key):
+        column = self._path(parts)
+        message = "{0} permission denied for protected column '{1}'".format(
+            permission, column)
+        if row_key is not _UNRESOLVED:
+            message += " of business row {0!r}".format(row_key)
+        message += " (operation {0}: {1})".format(
+            index, operation.operation.get('op'))
+        raise JsonPatchPermissionDenied(
+            message, op=operation, index=index, column=column,
+            permission=permission,
+            row_key=None if row_key is _UNRESOLVED else row_key)
+
+    def _ensure(self, permission, parts, index, operation,
+                row_key=_UNRESOLVED):
+        parts = tuple(parts)
+        if self.permissions.is_protected(parts) and not \
+                self.permissions.permits(permission, parts, row_key):
+            self._denied(index, operation, parts, permission, row_key)
+
+    def _ensure_reorder(self, parts, index, operation, row_key):
+        parts = tuple(parts)
+        if self.permissions.is_reorder_controlled(parts) and not \
+                self.permissions.permits(PERMISSION_REORDER, parts, row_key):
+            self._denied(index, operation, parts, PERMISSION_REORDER,
+                         row_key)
+
+    def _value_reaches(self, value, relative_parts):
+        """Whether the column ``relative_parts`` below a replaced or inserted
+        value exists within that value."""
+        current = value
+        for token in relative_parts:
+            if isinstance(current, Mapping):
+                if token not in current:
+                    return False
+                current = current[token]
+            elif isinstance(current, MutableSequence):
+                try:
+                    element_index = int(token)
+                except ValueError:
+                    return False
+                if not 0 <= element_index < len(current):
+                    return False
+                current = current[element_index]
+            else:
+                return False
+        return True
+
+    def _ensure_subtree(self, permission, root_parts, value, present_in,
+                        index, operation, row_key, resolve_row_key=True):
+        """Grants for the protected columns below a written value.
+
+        ``present_in`` are the values (the old and/or the new one) in which a
+        protected column has to actually occur, so a whole-object replacement
+        is checked against the columns it really overwrites. When the root is
+        a destination that the value is inserted or moved into, its indices
+        only become valid after the operation, so ``resolve_row_key`` is set
+        to ``False`` and the business key of the written value is used rather
+        than resolving the indices against the current document.
+        """
+        for column in self.permissions.protected_columns_under(root_parts):
+            relative = column[len(root_parts):]
+            if any(self._value_reaches(candidate, relative)
+                   for candidate in present_in):
+                column_key = row_key
+                if resolve_row_key:
+                    resolved = self._row_key(column)
+                    if resolved is not _UNRESOLVED:
+                        column_key = resolved
+                self._ensure(permission, column, index, operation,
+                             column_key)
+
+    def _check(self, operation, index):
+        if isinstance(operation, TestOperation):
+            self._check_read(operation, index, operation.pointer)
+        elif isinstance(operation, CopyOperation):
+            self._check_copy(operation, index)
+        elif isinstance(operation, MoveOperation):
+            self._check_move(operation, index)
+        elif isinstance(operation, RemoveOperation):
+            self._check_remove(operation, index)
+        elif isinstance(operation, AddOperation):
+            self._check_add(operation, index)
+        elif isinstance(operation, ReplaceOperation):
+            self._check_replace(operation, index)
+        elif isinstance(operation, AppendOperation):
+            # It both reads the old string and overwrites the member
+            self._check_read(operation, index, operation.pointer)
+            self._check_write(operation, index, operation.pointer.parts,
+                              self._row_key(operation.pointer.parts))
+        else:
+            # An operation the preflight has no rule for must not be allowed to
+            # bypass the authorization, so fail closed rather than skip it.
+            raise InvalidJsonPatch(
+                "The guarded preflight cannot authorize operation of type "
+                "{0}".format(type(operation).__name__), op=operation)
+
+    def _check_read(self, operation, index, pointer):
+        parts = tuple(pointer.parts)
+        row_key = self._row_key(parts)
+        self._ensure(PERMISSION_READ, parts, index, operation, row_key)
+        # Reading a container also exposes every protected column inside it
+        subobj, part = pointer.to_last(self.working)
+        value = self._try_get(subobj, part)
+        if value is not _MISSING:
+            self._ensure_subtree(PERMISSION_READ, parts, value, [value],
+                                 index, operation, row_key)
+
+    def _check_write(self, operation, index, parts, row_key):
+        self._ensure(PERMISSION_WRITE, parts, index, operation, row_key)
+
+    def _check_remove(self, operation, index):
+        pointer = operation.pointer
+        parts = tuple(pointer.parts)
+        row_key = self._row_key(parts)
+        self._check_write(operation, index, parts, row_key)
+
+        subobj, part = pointer.to_last(self.working)
+        if isinstance(subobj, MutableSequence):
+            # Taking an element out shifts every row after it, which is a
+            # change of row order rather than a column write.
+            self._ensure_reorder(parts[:-1], index, operation, row_key)
+        value = self._try_get(subobj, part)
+        if value is not _MISSING:
+            self._ensure_subtree(PERMISSION_WRITE, parts, value, [value],
+                                 index, operation, row_key)
+
+    def _check_add(self, operation, index):
+        pointer = operation.pointer
+        parts = tuple(pointer.parts)
+        value = operation.operation['value']
+        insertion = self._array_insertion(pointer)
+
+        present_in = [value]
+        if insertion is not None:
+            parts, displaced = insertion
+            self._ensure_reorder(parts[:-1], index, operation, displaced)
+            # The inserted element carries its own business row key
+            row_key = self.permissions.business_key(value)
+        else:
+            row_key = self._row_key(parts)
+            # Adding over an existing object member replaces it, so the
+            # protected columns of the value that is destroyed are covered too.
+            subobj, part = pointer.to_last(self.working)
+            old_value = self._try_get(subobj, part)
+            if old_value is not _MISSING:
+                present_in.append(old_value)
+
+        self._check_write(operation, index, parts, row_key)
+        self._ensure_subtree(PERMISSION_WRITE, parts, value, present_in,
+                             index, operation, row_key,
+                             resolve_row_key=False)
+
+    def _check_replace(self, operation, index):
+        pointer = operation.pointer
+        parts = tuple(pointer.parts)
+        new_value = operation.operation['value']
+        row_key = self._row_key(parts)
+        self._check_write(operation, index, parts, row_key)
+
+        subobj, part = pointer.to_last(self.working)
+        old_value = self._try_get(subobj, part)
+        if old_value is _MISSING:
+            # The replacement itself is invalid; the real application raises
+            # the canonical conflict, so only the new side is authorized here.
+            present_in = [new_value]
+        else:
+            # A whole-object replacement overwrites every protected column
+            # that occurs on either side of the replacement.
+            present_in = [old_value, new_value]
+        self._ensure_subtree(PERMISSION_WRITE, parts, new_value, present_in,
+                             index, operation, row_key)
+
+    def _check_destination_overwrite(self, pointer, index, operation):
+        """Protected columns of the value destroyed by writing at ``pointer``.
+
+        Only an existing object member is replaced; writing into an array
+        inserts and shifts elements instead of overwriting one.
+        """
+        subobj, part = pointer.to_last(self.working)
+        if isinstance(subobj, MutableSequence):
+            return
+        old_value = self._try_get(subobj, part)
+        if old_value is _MISSING:
+            return
+        parts = tuple(pointer.parts)
+        self._ensure_subtree(PERMISSION_WRITE, parts, old_value, [old_value],
+                             index, operation, self._row_key(parts))
+
+    def _check_move(self, operation, index):
+        from_pointer = operation._from_pointer()
+        from_parts = tuple(from_pointer.parts)
+        to_pointer = operation.pointer
+        to_parts = tuple(to_pointer.parts)
+        source_subobj, source_part = _to_existing_last(
+            from_pointer, self.working)
+        source_key = self._row_key(from_parts)
+        value = self._try_get(source_subobj, source_part)
+        if value is _MISSING:
+            # An invalid move source; let the real application raise the
+            # canonical conflict instead of authorizing a missing value.
+            return
+
+        # The source has to be read, then detached from its column.
+        self._ensure(PERMISSION_READ, from_parts, index, operation, source_key)
+        self._ensure_subtree(PERMISSION_READ, from_parts, value, [value],
+                             index, operation, source_key)
+        self._check_write(operation, index, from_parts, source_key)
+        self._ensure_subtree(PERMISSION_WRITE, from_parts, value, [value],
+                             index, operation, source_key)
+        removed_from = None
+        if isinstance(source_subobj, MutableSequence):
+            self._ensure_reorder(from_parts[:-1], index, operation,
+                                 source_key)
+            removed_from = (from_parts[:-1], source_part)
+
+        # The same business row is written at the destination, keeping its
+        # row key; the grant must not follow the bare array index.
+        insertion = self._array_insertion(to_pointer, removed_from)
+        if insertion is not None:
+            to_parts, displaced = insertion
+            self._ensure_reorder(to_parts[:-1], index, operation, displaced)
+        else:
+            self._check_destination_overwrite(to_pointer, index, operation)
+        self._check_write(operation, index, to_parts, source_key)
+        self._ensure_subtree(PERMISSION_WRITE, to_parts, value, [value],
+                             index, operation, source_key,
+                             resolve_row_key=False)
+
+    def _check_copy(self, operation, index):
+        from_pointer = operation._from_pointer()
+        from_parts = tuple(from_pointer.parts)
+        to_pointer = operation.pointer
+        to_parts = tuple(to_pointer.parts)
+        source_subobj, source_part = _to_existing_last(
+            from_pointer, self.working)
+        source_key = self._row_key(from_parts)
+        value = self._try_get(source_subobj, source_part)
+        if value is _MISSING:
+            # An invalid copy source; the real application raises the conflict.
+            return
+
+        self._ensure(PERMISSION_READ, from_parts, index, operation, source_key)
+        self._ensure_subtree(PERMISSION_READ, from_parts, value, [value],
+                             index, operation, source_key)
+
+        insertion = self._array_insertion(to_pointer)
+        if insertion is not None:
+            to_parts, displaced = insertion
+            self._ensure_reorder(to_parts[:-1], index, operation, displaced)
+        else:
+            self._check_destination_overwrite(to_pointer, index, operation)
+        # A copied row carries the business key of its value, if it has one.
+        row_key = self.permissions.business_key(value)
+        if row_key is _UNRESOLVED:
+            row_key = source_key
+        self._check_write(operation, index, to_parts, row_key)
+        self._ensure_subtree(PERMISSION_WRITE, to_parts, value, [value],
+                             index, operation, row_key,
+                             resolve_row_key=False)
+
+
+class GuardedJsonPatch(JsonPatch):
+    """A :class:`JsonPatch` whose whole batch is authorized before it is
+    applied.
+
+    Every operation is checked against a :class:`ColumnPermissions` policy on
+    a private copy of the document first. If any operation is denied,
+    :class:`JsonPatchPermissionDenied` is raised for the first offending
+    operation and the document passed to :meth:`apply` is left unchanged; no
+    operation of the batch is written. The check also replays the operations,
+    so indices are decoded against the state each operation actually reaches
+    and permissions follow the business row keys, not array positions.
+
+    :param patch: Iterable of operation dicts; a raw JSON-encoded string is
+                  handled by :meth:`from_string`.
+    :param permissions: The protected columns and their grants.
+    :type permissions: ColumnPermissions
+    """
+
+    def __init__(self, patch, permissions, pointer_cls=JsonPointer):
+        super().__init__(patch, pointer_cls=pointer_cls)
+        if not isinstance(permissions, ColumnPermissions):
+            raise TypeError(
+                "permissions must be a ColumnPermissions instance")
+        self.permissions = permissions
+
+    @classmethod
+    def from_string(cls, patch_str, loads=None, pointer_cls=JsonPointer,
+                    permissions=None):
+        """Creates a guarded patch from a raw JSON patch string."""
+        json_loader = loads or cls.json_loader
+        patch = json_loader(patch_str)
+        return cls(patch, permissions, pointer_cls=pointer_cls)
+
+    def apply(self, obj, in_place=False, atomic=False):
+        # The preflight either accepts every operation or raises before the
+        # document is touched, so application is all-or-nothing regardless of
+        # the atomic flag.
+        _PatchPreflight(obj, self.permissions, self.pointer_cls).run(
+            self._ops)
+        return super().apply(obj, in_place=in_place, atomic=atomic)
+
+
+def apply_guarded_patch(doc, patch, permissions, in_place=False,
+                        pointer_cls=JsonPointer):
+    """Apply a JSON Patch after a whole-batch permission preflight.
+
+    Like :func:`apply_patch`, but every operation is checked against
+    ``permissions`` before the document is changed. A denied operation raises
+    :class:`JsonPatchPermissionDenied`, pointing at the first offending
+    operation, its protected column and the business row it belongs to, and
+    leaves ``doc`` unchanged.
+
+    :param doc: JSON document, including arrays and scalar values.
+    :type doc: object
+
+    :param patch: Iterable of operation dicts or a raw JSON-encoded string.
+    :type patch: iterable or str
+
+    :param permissions: The protected columns and their grants.
+    :type permissions: ColumnPermissions
+
+    :param in_place: While ``True`` patch will modify target document.
+    :type in_place: bool
+
+    :param pointer_cls: JSON pointer class to use.
+    :type pointer_cls: Type[JsonPointer]
+
+    :return: Resulting document.
+    :rtype: object
+    """
+    if isinstance(patch, (str, bytes)):
+        guarded = GuardedJsonPatch.from_string(
+            patch, pointer_cls=pointer_cls, permissions=permissions)
+    else:
+        guarded = GuardedJsonPatch(patch, permissions,
+                                   pointer_cls=pointer_cls)
+    return guarded.apply(doc, in_place=in_place)

@@ -525,9 +525,108 @@ and a load function to ``from_string``:
     {'foo': 1, 'bar': Decimal('1.10')}
 
 
+Guarded Patches
+---------------
+
+Some documents hold columns that must only change through an authorized
+data-fix, while their other columns stay open to ordinary patches. A
+:class:`ColumnPermissions` policy names the protected columns and the grants
+on them; a :class:`GuardedJsonPatch` then checks the *whole* batch before it
+writes anything. A protected column is protected together with every column
+below it, and grants on a column cover its descendants.
+
+.. code-block:: python
+
+    >>> import jsonpatch
+    >>> doc = {'rows': [
+    ...     {'id': 1, 'name': 'Alice', 'ssn': '111', 'note': 'open'},
+    ...     {'id': 2, 'name': 'Bob', 'ssn': '222', 'note': 'open'},
+    ... ]}
+    >>> protected = ['/rows/0/ssn', '/rows/1/ssn']
+    >>> permissions = jsonpatch.ColumnPermissions(
+    ...     protected=protected,
+    ...     grants=[{'permission': 'write', 'column': '/rows', 'rows': [2]}],
+    ... )
+
+The business row of an array element is the value of its ``id`` member (the
+member name is configurable). Open columns need no grant; a write to a
+protected column is checked against the row it belongs to.
+
+.. code-block:: python
+
+    >>> patch = [
+    ...     {'op': 'replace', 'path': '/rows/0/note', 'value': 'checked'},
+    ...     {'op': 'replace', 'path': '/rows/0/ssn', 'value': '000'},
+    ... ]
+    >>> try:
+    ...     jsonpatch.apply_guarded_patch(doc, patch, permissions)
+    ... except jsonpatch.JsonPatchPermissionDenied as denied:
+    ...     print(denied.index, denied.column, denied.permission, denied.row_key)
+    1 /rows/0/ssn write 1
+    >>> doc['rows'][0]['note']
+    'open'
+
+The denial points at the first offending operation, and because the batch is
+checked up front the document is left unchanged. A grant for business row 2
+authorizes its protected column at any index it currently occupies:
+
+.. code-block:: python
+
+    >>> result = jsonpatch.apply_guarded_patch(
+    ...     doc, [{'op': 'replace', 'path': '/rows/1/ssn', 'value': '999'}],
+    ...     permissions)
+    >>> result['rows'][1]['ssn']
+    '999'
+
+The three permissions are granted independently:
+
+* ``'read'`` for ``test`` and for the ``from`` of ``move`` and ``copy``,
+  including every protected column inside the value that is read;
+* ``'write'`` for adding, removing, replacing or moving a value at a
+  protected column;
+* ``'reorder'`` for inserting into or removing from an array, which shifts
+  the positions of its rows.
+
+Indices are decoded while the operations are replayed on a private copy, so a
+grant follows the business row rather than the array position. Removing the
+element in front of a row changes its index, but never transfers a grant to
+the row that shifts into that index:
+
+.. code-block:: python
+
+    >>> permissions = jsonpatch.ColumnPermissions(
+    ...     protected=protected,
+    ...     grants=[
+    ...         {'permission': 'reorder', 'column': '/rows'},
+    ...         {'permission': 'write', 'column': '/rows', 'rows': [1]},
+    ...     ])
+    >>> try:
+    ...     jsonpatch.apply_guarded_patch(doc, [
+    ...         {'op': 'remove', 'path': '/rows/0'},
+    ...         {'op': 'replace', 'path': '/rows/0/ssn', 'value': '000'},
+    ...     ], permissions)
+    ... except jsonpatch.JsonPatchPermissionDenied as denied:
+    ...     print(denied.column, denied.row_key)
+    /rows/0/ssn 2
+
+A whole-object replacement is checked against the protected columns it
+actually overwrites, on both the old and the new side, rather than only the
+replaced location:
+
+.. code-block:: python
+
+    >>> try:
+    ...     jsonpatch.apply_guarded_patch(doc, [
+    ...         {'op': 'replace', 'path': '/rows/0',
+    ...          'value': {'id': 1, 'name': 'Z', 'ssn': '000'}},
+    ...     ], jsonpatch.ColumnPermissions(protected=protected))
+    ... except jsonpatch.JsonPatchPermissionDenied as denied:
+    ...     print(denied.column, denied.permission)
+    /rows/0/ssn write
+
+
 String append extension
 -----------------------
-
 ``JsonPatchWithAppend`` accepts the standard operations and an additional
 ``append`` operation for existing strings. This extension is not part of
 RFC 6902, so both the producer and consumer of the patch must support it.
