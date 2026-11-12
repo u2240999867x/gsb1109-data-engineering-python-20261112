@@ -1,0 +1,60 @@
+=============
+About Mimesis
+=============
+
+What is Mimesis?
+----------------
+
+**Mimesis** provides a perfect solution for generating data. It effectively populates databases,
+creates intricate JSON/XML files, anonymizes production data, and generates high-quality
+Pandas dataframes. If you require these functions, Mimesis is the ideal tool for you.
+
+Mimesis **is not** an object factory intended for use with a specific database or ORM.
+However, this does not mean that it cannot be used with an ORM. In fact, it can be easily
+integrated with an ORM using third-party libraries like `mimesis-factory <https://github.com/lk-geimfari/mimesis-factory>`_ or others.
+
+Features
+--------
+
+The key features are:
+
+- **Multilingual**: Supports 47 different locales.
+- **Extensibility**: Supports custom data providers and custom field handlers.
+- **Ease of use**: Features a simple design and clear documentation for straightforward data generation.
+- **Performance**: Widely recognized as the fastest data generator among Python solutions. See :doc:`benchmarks`.
+- **Data variety**: Includes various data providers designed for different use cases.
+- **Schema-based generators**: Offers schema-based data generators to effortlessly produce data of any complexity.
+- **Relational data**: Supports generating related datasets with foreign keys and
+  nested schemas via :class:`~mimesis.builder.SchemaBuilder`
+  (see :doc:`relational`).
+- **Intuitive**: Great editor support. Fully typed, so you get autocompletion almost everywhere.
+
+What is fake data?
+------------------
+
+Fake data refers to data that is not useful or sensitive, but is used to occupy a space
+where real data is typically located. This type of data can act as a placeholder for both
+testing and operational purposes. In testing, it can also serve as stubs or placeholders.
+
+What does the name mean?
+------------------------
+
+Mimesis (`/maɪˈmiːsəs/ <https://en.wikipedia.org/wiki/Help:IPA/English>`_;
+`Ancient Greek <https://en.wikipedia.org/wiki/Ancient_Greek_language>`_: μίμησις (*mīmēsis*), from μιμεῖσθαι (*mīmeisthai*),
+"to imitate", from μῖμος (mimos), "imitator, actor") is a term of critical and philosophical
+significance, rooted in Ancient Greek, with various connotations such as imitation, representation,
+mimicry, receptivity, nonsensuous similarity, resemblance, expression, and the presentation of the self.
+
+Why octopus?
+------------
+
+Octopuses are fascinating creatures, and some families of octopuses
+have incredible `mimicry <https://en.wikipedia.org/wiki/Mimicry>`_ abilities.
+`Thaumoctopus mimicus <https://en.wikipedia.org/wiki/Mimic_octopus>`_ is a particularly
+impressive example, and if you haven't heard of it yet, you should definitely read up on this remarkable species.
+
+Check out that spotty bastard. Isn't it badass as hell?
+
+.. image:: _static/thaumoctopus_mimicus.jpg
+   :width: 700
+   :target: https://mimesis.name/

@@ -1,0 +1,163 @@
+"""Provides all providers in one place."""
+
+import inspect
+import typing as t
+
+from mimesis.locales import Locale
+from mimesis.providers.base import (
+    BaseDataProvider,
+    BaseProvider,
+    ProviderRegistry,
+)
+from mimesis.types import MissingSeed, Seed
+
+
+if t.TYPE_CHECKING:
+    from typing_extensions import Self
+
+
+__all__ = ["Generic"]
+
+
+class Generic(BaseProvider):
+    """Class which contains all providers in one place."""
+
+    def __init__(
+        self,
+        locale: Locale = Locale.DEFAULT,
+        seed: Seed = MissingSeed,
+    ) -> None:
+        """Initialize attributes lazily."""
+        super().__init__(seed=seed)
+        self.locale = locale
+
+        # Every provider is stored as a class under ``_<name>`` and
+        # instantiated on first access (see ``__getattr__``).
+        for name, provider_cls in ProviderRegistry.get_all().items():
+            if provider_cls is not Generic:
+                setattr(self, f"_{name}", provider_cls)
+
+    class Meta:
+        """Class for metadata."""
+
+        name: t.Final[str] = "generic"
+        auto_register: t.Final[bool] = False
+
+    def __getattr__(self, attrname: str) -> t.Any:
+        """Get attribute without an underscore.
+
+        :param attrname: Attribute name.
+        :return: An attribute.
+        """
+        attribute = object.__getattribute__(self, "_" + attrname)
+        if inspect.isclass(attribute) and issubclass(attribute, BaseProvider):
+            if issubclass(attribute, BaseDataProvider):
+                instance = attribute(self.locale, self.seed)
+            else:
+                instance = attribute(seed=self.seed)
+            self.__dict__[attrname] = instance
+            return instance
+        raise AttributeError(attrname)
+
+    def __dir__(self) -> list[str]:
+        """Available data providers.
+
+        :return: List of attributes.
+        """
+        attributes = []
+        # Instance attributes of BaseProvider plus ``locale``: not providers.
+        exclude = {"random", "seed", "locale"}
+
+        for attr in self.__dict__:
+            if attr not in exclude:
+                if attr.startswith("_"):
+                    attribute = attr.replace("_", "", 1)
+                    attributes.append(attribute)
+                else:
+                    attributes.append(attr)
+        return attributes
+
+    def reseed(self, seed: Seed = MissingSeed) -> None:
+        """Reseed the internal random generator.
+
+        Overrides method `BaseProvider.reseed()`.
+
+        :param seed: Seed for random.
+        :return: None.
+        """
+        # Make sure to reseed the random generator on Generic itself.
+        super().reseed(seed)
+
+        # Only instantiated providers need reseeding: lazy ones are
+        # created with the current ``self.seed`` in ``__getattr__``.
+        for provider in self.__dict__.values():
+            if isinstance(provider, BaseProvider):
+                provider.reseed(seed)
+
+    def add_provider(self, cls: type[BaseProvider], **kwargs: t.Any) -> None:
+        """Adds a custom provider to a Generic() object.
+
+        :param cls: Custom provider.
+        :param kwargs: Keyword arguments for provider.
+        :raises TypeError: if cls is Generic, if cls is not
+            class or is not a subclass of BaseProvider.
+        :return: None.
+        """
+        if inspect.isclass(cls):
+            if not issubclass(cls, BaseProvider):
+                raise TypeError(
+                    "The provider must be a subclass of mimesis.providers.BaseProvider"
+                )
+            try:
+                name = cls.Meta.name
+            except AttributeError:
+                name = cls.__name__.lower()
+
+            # Enforce the same seed is used across all providers.
+            kwargs.pop("seed", None)
+
+            instance = cls(seed=self.seed, **kwargs)
+            if isinstance(instance, Generic):
+                raise TypeError("Cannot add Generic instance to itself.")
+            setattr(self, name, instance)
+        else:
+            raise TypeError("The provider must be a class.")
+
+    def add_providers(self, *providers: type[BaseProvider]) -> None:
+        """Adds multiple custom providers to a Generic() object.
+
+        This method is a convenience method for adding multiple providers
+        at once. It is equivalent to calling :meth:`add_provider` for each
+        provider in the list of providers.
+
+        Example:
+        >>> from mimesis import Generic
+        >>> from myproviders import ProviderA, ProviderB
+        >>> g = Generic()
+        >>> g.add_providers(ProviderA, ProviderB)
+        >>> g.providera.never()
+        >>> g.providerb.gonna()
+
+        If you want to pass keyword arguments to the providers, you can
+        do so by using :meth:`add_provider` instead.
+
+        :param providers: Custom providers.
+        :return: None
+        """
+        for provider in providers:
+            self.add_provider(provider)
+
+    def __iadd__(self, other: type[BaseProvider]) -> "Self":
+        """Adds a custom provider to a Generic() object.
+
+        :param other: Custom provider.
+        :return: None
+        :raises TypeError: if cls is not class or is not a subclass
+            of BaseProvider.
+        """
+        self.add_provider(other)
+        return self
+
+    def __str__(self) -> str:
+        """Human-readable representation of locale."""
+        return f"{self.__class__.__name__} <{self.locale}>"

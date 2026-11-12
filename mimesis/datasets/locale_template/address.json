@@ -1,0 +1,47 @@
+{
+  "address_fmt": "{st_num} {st_name} {st_sfx}",
+  "city": [
+    "Test"
+  ],
+  "continent": [
+    "Test"
+  ],
+  "country": {
+    "current_locale": "Test",
+    "name": [
+      "Test"
+    ]
+  },
+  "postal_code_fmt": "#####",
+  "state": {
+    "abbr": [
+      "Test"
+    ],
+    "name": [
+      "Test"
+    ]
+  },
+  "street": {
+    "name": [
+      "Test"
+    ],
+    "suffix": [
+      "Test"
+    ]
+  },
+  "secondary_address_fmt": [
+    "Apt. #",
+    "Apt. ##",
+    "Apt. ###",
+    "Apt. @",
+    "Suite ###",
+    "Suite ####",
+    "Unit #",
+    "Unit ##",
+    "Unit @",
+    "PO Box ###",
+    "PO Box ####",
+    "# @",
+    "## @"
+  ]
+}

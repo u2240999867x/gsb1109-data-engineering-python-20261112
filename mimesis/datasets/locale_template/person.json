@@ -1,0 +1,56 @@
+{
+  "academic_degree": [
+    "Test"
+  ],
+  "gender": [
+    "Test"
+  ],
+  "language": [
+    "Test"
+  ],
+  "names": {
+    "female": [
+      "Test"
+    ],
+    "male": [
+      "Test"
+    ]
+  },
+  "__COMMENT_NATIONALITY__": "Optional -> nationality: {female: [], male: []}",
+  "nationality": [
+    "Test"
+  ],
+  "occupation": [
+    "Test"
+  ],
+  "__COMMENT_SURNAMES__": "Optional -> surnames: {female: [], male: []}",
+  "surnames": [
+    "Test"
+  ],
+  "title": {
+    "female": {
+      "typical": [
+        "Test"
+      ],
+      "academic": [
+        "Test"
+      ]
+    },
+    "male": {
+      "typical": [
+        "Test"
+      ],
+      "academic": [
+        "Test"
+      ]
+    }
+  },
+  "university": [
+    "Test"
+  ],
+  "telephone_fmt": [
+    "###-###-####",
+    "(###) ###-####",
+    "1-###-###-####"
+  ]
+}
