@@ -97,6 +97,63 @@ class FieldArityError(ValueError):
         )
 
 
+class BindingError(ValueError):
+    """Base class for errors raised while resolving bound references."""
+
+
+class NoMatchingRowsError(BindingError):
+    """Raised when a binding finds no candidate rows."""
+
+    def __init__(
+        self,
+        source: str,
+        conditions: t.Iterable[str] | None = None,
+    ) -> None:
+        """Initialize attributes for informative output.
+
+        :param source: Name of the bound table.
+        :param conditions: Field names used in the join conditions.
+        """
+        self.source = source
+        self.conditions = tuple(conditions or ())
+
+    def __str__(self) -> str:
+        if self.conditions:
+            fields = ", ".join(self.conditions)
+            return f"No rows in «{self.source}» match the join conditions on: {fields}."
+        return f"No candidate rows available from «{self.source}»."
+
+
+class NullBoundValueError(BindingError):
+    """Raised when a bound column resolves to None."""
+
+    def __init__(self, source: str, field: str) -> None:
+        """Initialize attributes for informative output.
+
+        :param source: Name of the bound table.
+        :param field: Name of the column whose value is None.
+        """
+        self.source = source
+        self.field = field
+
+    def __str__(self) -> str:
+        return f"Column «{self.field}» of the bound row from «{self.source}» is None."
+
+
+class CircularBindingError(BindingError):
+    """Raised when bound references depend on each other in a cycle."""
+
+    def __init__(self, source: str) -> None:
+        """Initialize attributes for informative output.
+
+        :param source: Name of the bound table closing the cycle.
+        """
+        self.source = source
+
+    def __str__(self) -> str:
+        return f"Circular binding detected involving «{self.source}»."
+
+
 class AliasesTypeError(TypeError):
     """Raised when aliases is not a flat dictionary."""
 

@@ -15,6 +15,9 @@ orders and line items, etc. — use :class:`~mimesis.builder.SchemaBuilder`.
 - Define multiple named schemas that share one locale and seed
 - Link records with **foreign keys** (``sb.ref(users).id``)
 - Embed a **whole related record** (``sb.ref(users)``)
+- **Bind** several columns to one shared parent row, optionally with
+  **join conditions** (``sb.bind(sites, where={...})``)
+- **Feed** external parent rows as a one-shot input (``sb.feed(...)``)
 - **Nest** child documents inline (``addresses(count=2)``)
 - Generate everything in one ``create()`` call with **automatic dependency
   resolution** (generation order does not depend on kwarg order)
@@ -128,6 +131,87 @@ reference to :meth:`~mimesis.builder.SchemaBuilder.ref` to link schemas:
    Every schema referenced with ``sb.ref()`` must be included in the same
    ``create()`` call (for example ``users=3``), so parent rows exist before
    foreign keys are resolved.
+
+Bound References and Join Conditions
+------------------------------------
+
+``sb.ref()`` picks each field independently, so two fields may come from
+different parent rows. When several columns must come from the **same**
+parent row — an author's id *and* country, for example — create a
+**binding** with :meth:`~mimesis.builder.SchemaBuilder.bind` and reuse it:
+
+.. code-block:: python
+
+    sb.feed("users", [
+        {"id": 1, "country": "US"},
+        {"id": 2, "country": "DE"},
+    ])
+    sb.feed("sites", [
+        {"id": 10, "country": "US", "url": "us.example.com"},
+        {"id": 11, "country": "DE", "url": "de.example.com"},
+    ])
+
+    author = sb.bind("users")
+    # join condition: only sites from the bound author's country
+    site = sb.bind("sites", where={"country": author.country})
+
+    posts = sb.schema("posts", {
+        "id": sb.f("increment", accumulator="post"),
+        "author_id": author.id,          # \
+        "author_country": author.country, # } all from one users row
+        "site_id": site.id,               # \
+        "site_url": site.url,             # } one matching sites row
+    })
+
+    data = sb.create(posts=20)
+
+Semantics of bindings:
+
+- **One row per binding** — within a single generated row, every column
+  taken from the same ``Binding`` object comes from one pinned parent
+  row. Two separate ``sb.bind()`` calls sample independently.
+- **Join conditions** — ``where`` maps parent field names to literals or
+  to columns of other bindings; all conditions must match. Conditions
+  are resolved per generated row, so ``site`` above follows the author
+  of *that* post.
+- **Per-row sampling** — candidates are counted per row, so duplicate
+  parent rows are weighted by their multiplicity.
+- **Failure isolation** — each generated row gets a fresh binding scope;
+  a row that fails to resolve never leaks pinned rows into the next one.
+
+Bindings to a generated schema work too — pass the ``SchemaRef`` instead
+of a table name (``sb.bind(users)``) and include the schema in
+``create()`` as usual.
+
+Three failure modes are reported with distinct exceptions from
+:mod:`mimesis.exceptions`:
+
+- :class:`~mimesis.exceptions.NoMatchingRowsError` — no candidate row
+  satisfies the join conditions (or the parent table is empty)
+- :class:`~mimesis.exceptions.NullBoundValueError` — the pinned row's
+  column value is ``None``
+- :class:`~mimesis.exceptions.CircularBindingError` — bindings depend on
+  each other in a cycle
+
+Feeding External Parent Rows
+----------------------------
+
+:meth:`~mimesis.builder.SchemaBuilder.feed` accepts parent rows as a
+**one-shot input**: any iterable (including generators or cursors) is
+materialized immediately. Calling ``feed()`` again with the same name
+appends rows while preserving order, so chunked feeding produces the
+same seeded samples as feeding everything at once:
+
+.. code-block:: python
+
+    sb.feed("users", all_users)              # one shot
+    # ... is equivalent to ...
+    sb.feed("users", all_users[:100])        # chunked
+    sb.feed("users", all_users[100:])
+
+Fed tables persist across ``create()`` and ``clear()`` calls and are
+dropped by ``reset()``. A fed table name must not collide with a defined
+schema name.
 
 Nested Documents
 ----------------

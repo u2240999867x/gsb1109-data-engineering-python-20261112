@@ -3,12 +3,15 @@
 from mimesis.enums import Gender
 from mimesis.exceptions import (
     AliasesTypeError,
+    CircularBindingError,
     FieldArityError,
     FieldError,
     FieldNameError,
     FieldsetError,
     LocaleError,
+    NoMatchingRowsError,
     NonEnumerableError,
+    NullBoundValueError,
     SchemaError,
 )
 
@@ -45,3 +48,20 @@ def test_field_arity_error_str():
 
 def test_aliases_type_error_str():
     assert "aliases" in str(AliasesTypeError())
+
+
+def test_no_matching_rows_error_str():
+    assert "users" in str(NoMatchingRowsError("users"))
+    message = str(NoMatchingRowsError("sites", ["country"]))
+    assert "sites" in message
+    assert "country" in message
+
+
+def test_null_bound_value_error_str():
+    message = str(NullBoundValueError("users", "id"))
+    assert "users" in message
+    assert "id" in message
+
+
+def test_circular_binding_error_str():
+    assert "users" in str(CircularBindingError("users"))

@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from mimesis.builder.core import SchemaBuilder
 
 __all__ = [
+    "Binding",
+    "BoundColumn",
     "FieldRef",
     "LazyChoice",
     "LazyField",
@@ -169,6 +171,86 @@ class SchemaRefProxy(Resolvable):
 
     def __repr__(self) -> str:
         return f"SchemaRefProxy({self._schema_name!r})"
+
+
+class BoundColumn(Resolvable):
+    """A single column extracted from the row pinned by a Binding.
+
+    All columns taken from the same binding within one generated row
+    come from the same parent row.
+
+    Example::
+
+        author = sb.bind(users)
+        author.id  # Returns BoundColumn
+    """
+
+    __slots__ = ("_binding", "_field_name")
+
+    def __init__(self, binding: "Binding", field_name: str) -> None:
+        self._binding = binding
+        self._field_name = field_name
+
+    def _resolve(self, builder: "SchemaBuilder") -> Any:
+        return builder._pick_bound(self._binding, self._field_name)
+
+    def __repr__(self) -> str:
+        return f"BoundColumn({self._binding._source_name!r}.{self._field_name!r})"
+
+
+class Binding(Resolvable):
+    """Bound reference to a parent table with optional join conditions.
+
+    Within one generated row, the binding pins a single parent row:
+    every column taken from this binding comes from that row. The
+    ``where`` conditions filter candidate rows before sampling; values
+    may be literals or columns of other bindings (join conditions).
+
+    Example::
+
+        author = sb.bind(users)
+        site = sb.bind(sites, where={"country": author.country})
+
+        posts = sb.schema(
+            "posts",
+            {
+                "author_id": author.id,
+                "author_country": author.country,
+                "site_id": site.id,
+            },
+        )
+    """
+
+    __slots__ = ("_source", "_source_name", "_where")
+
+    def __init__(
+        self,
+        source: Any,
+        source_name: str,
+        where: dict[str, Any] | None = None,
+    ) -> None:
+        self._source = source
+        self._source_name = source_name
+        self._where = dict(where) if where else {}
+
+    def __getattr__(self, field_name: str) -> BoundColumn:
+        """Access a column of the bound parent row.
+
+        :param field_name: Name of the column to reference.
+        :return: A BoundColumn that resolves within this binding's row.
+        """
+        if field_name.startswith("_"):
+            raise AttributeError(field_name)
+        return BoundColumn(self, field_name)
+
+    def _resolve(self, builder: "SchemaBuilder") -> Any:
+        """Resolve to the pinned parent row for the current row."""
+        return builder._resolve_binding(self)
+
+    def __repr__(self) -> str:
+        if self._where:
+            return f"Binding({self._source_name!r}, where={self._where!r})"
+        return f"Binding({self._source_name!r})"
 
 
 class NestedSchema(Resolvable):

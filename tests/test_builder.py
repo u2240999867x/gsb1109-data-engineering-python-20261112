@@ -7,6 +7,8 @@ import pytest
 from mimesis import SchemaBuilder, SchemaRef
 from mimesis.builder import SchemaBuilder as BuilderFromPackage
 from mimesis.builder.resolver import (
+    Binding,
+    BoundColumn,
     FieldRef,
     LazyChoice,
     LazyField,
@@ -16,6 +18,12 @@ from mimesis.builder.resolver import (
     SchemaRefProxy,
 )
 from mimesis.enums import TimestampFormat
+from mimesis.exceptions import (
+    BindingError,
+    CircularBindingError,
+    NoMatchingRowsError,
+    NullBoundValueError,
+)
 from mimesis.locales import Locale
 
 
@@ -706,3 +714,337 @@ class TestComplexSchemas:
 
         # tags was also requested as top-level generation
         assert len(data["tags"]) == 6
+
+
+USER_ROWS = [
+    {"id": 1, "country": "US"},
+    {"id": 2, "country": "DE"},
+    {"id": 3, "country": "US"},
+]
+
+SITE_ROWS = [
+    {"id": 10, "country": "US", "url": "us.example.com"},
+    {"id": 11, "country": "DE", "url": "de.example.com"},
+    {"id": 12, "country": "FR", "url": "fr.example.com"},
+]
+
+
+def _define_posts(sb: SchemaBuilder) -> None:
+    author = sb.bind("users")
+    site = sb.bind("sites", where={"country": author.country})
+    sb.schema(
+        "posts",
+        {
+            "id": sb.f("increment"),
+            "author_id": author.id,
+            "author_country": author.country,
+            "site_id": site.id,
+            "site_url": site.url,
+        },
+    )
+
+
+class TestFeed:
+    def test_feed_returns_name_for_inline_bind(self, sb: SchemaBuilder) -> None:
+        author = sb.bind(sb.feed("users", USER_ROWS))
+        sb.schema("posts", {"author_id": author.id})
+
+        data = sb.create(posts=5)
+        valid_ids = {row["id"] for row in USER_ROWS}
+        assert all(p["author_id"] in valid_ids for p in data["posts"])
+
+    def test_feed_accepts_one_shot_iterator(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", (row for row in USER_ROWS))
+        author = sb.bind("users")
+        sb.schema("posts", {"author_id": author.id})
+
+        data = sb.create(posts=5)
+        valid_ids = {row["id"] for row in USER_ROWS}
+        assert all(p["author_id"] in valid_ids for p in data["posts"])
+
+    def test_feed_appends_preserving_order(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS[:1])
+        sb.feed("users", USER_ROWS[1:])
+        assert sb._fed["users"] == USER_ROWS
+
+    def test_chunked_feeding_matches_single_feed(self) -> None:
+        def build(user_chunks: list, site_chunks: list) -> dict:
+            sb = SchemaBuilder(Locale.EN, seed=SEED)
+            for chunk in user_chunks:
+                sb.feed("users", chunk)
+            for chunk in site_chunks:
+                sb.feed("sites", chunk)
+            _define_posts(sb)
+            return sb.create(posts=30)
+
+        one_shot = build([USER_ROWS], [SITE_ROWS])
+        chunked = build(
+            [USER_ROWS[:1], USER_ROWS[1:2], USER_ROWS[2:]],
+            [SITE_ROWS[:2], SITE_ROWS[2:]],
+        )
+        assert one_shot == chunked
+
+    def test_duplicate_candidates_are_counted_per_row(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", [{"id": 1}] * 3 + [{"id": 2}])
+        author = sb.bind("users")
+        sb.schema("posts", {"author_id": author.id})
+
+        data = sb.create(posts=200)
+        ones = sum(p["author_id"] == 1 for p in data["posts"])
+        twos = sum(p["author_id"] == 2 for p in data["posts"])
+        # 3:1 multiplicity must be reflected in the sampled counts
+        assert ones > twos * 2
+
+    def test_feed_rejects_non_mapping_row(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match="mappings"):
+            sb.feed("users", [{"id": 1}, ("id", 2)])  # type: ignore[list-item]
+
+    def test_feed_rejects_bad_name(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match="table name"):
+            sb.feed("", [{"id": 1}])
+        with pytest.raises(TypeError, match="table name"):
+            sb.feed(42, [{"id": 1}])  # type: ignore[arg-type]
+
+    def test_feed_name_collides_with_schema(self, sb: SchemaBuilder) -> None:
+        sb.schema("users", {"id": sb.f("increment")})
+        with pytest.raises(ValueError, match="collides"):
+            sb.feed("users", [{"id": 1}])
+
+    def test_schema_name_collides_with_fed_table(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", [{"id": 1}])
+        with pytest.raises(ValueError, match="collides"):
+            sb.schema("users", {"id": sb.f("increment")})
+
+
+class TestBindings:
+    def test_columns_of_same_binding_share_one_row(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        sb.feed("sites", SITE_ROWS)
+        _define_posts(sb)
+
+        data = sb.create(posts=30)
+        users_by_id = {row["id"]: row for row in USER_ROWS}
+        sites_by_id = {row["id"]: row for row in SITE_ROWS}
+
+        for post in data["posts"]:
+            author = users_by_id[post["author_id"]]
+            site = sites_by_id[post["site_id"]]
+            # author columns come from the same users row
+            assert post["author_country"] == author["country"]
+            # site columns come from the same sites row
+            assert post["site_url"] == site["url"]
+            # join condition: site belongs to the author's country
+            assert site["country"] == author["country"]
+
+    def test_literal_join_conditions(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        us_authors = sb.bind("users", where={"country": "US"})
+        sb.schema("posts", {"author_id": us_authors.id})
+
+        data = sb.create(posts=20)
+        assert all(p["author_id"] in {1, 3} for p in data["posts"])
+
+    def test_independent_bindings_sample_independently(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        first = sb.bind("users")
+        second = sb.bind("users")
+        sb.schema("pairs", {"a": first.id, "b": second.id})
+
+        data = sb.create(pairs=50)
+        assert len({(p["a"], p["b"]) for p in data["pairs"]}) > 1
+
+    def test_whole_record_binding(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        author = sb.bind("users")
+        sb.schema(
+            "posts",
+            {
+                "author_id": author.id,
+                "author": author,
+            },
+        )
+
+        data = sb.create(posts=10)
+        for post in data["posts"]:
+            assert post["author"] == {
+                "id": post["author_id"],
+                "country": post["author"]["country"],
+            }
+            assert post["author"]["id"] == post["author_id"]
+
+    def test_bind_to_generated_schema(self, sb: SchemaBuilder) -> None:
+        users = sb.schema(
+            "users",
+            {
+                "id": sb.f("increment"),
+                "country": sb.choice(["US", "DE"]),
+            },
+        )
+        author = sb.bind(users)
+        sb.schema(
+            "posts",
+            {
+                "author_id": author.id,
+                "author_country": author.country,
+            },
+        )
+
+        data = sb.create(posts=20, users=5)
+        users_by_id = {u["id"]: u for u in data["users"]}
+        for post in data["posts"]:
+            author_row = users_by_id[post["author_id"]]
+            assert post["author_country"] == author_row["country"]
+
+    def test_bind_to_generated_schema_requires_it_in_create(
+        self, sb: SchemaBuilder
+    ) -> None:
+        users = sb.schema("users", {"id": sb.f("increment")})
+        sb.schema("posts", {"author_id": sb.bind(users).id})
+
+        with pytest.raises(ValueError, match="required by 'posts'"):
+            sb.create(posts=5)
+
+    def test_missing_feed_table_raises(self, sb: SchemaBuilder) -> None:
+        sb.schema("posts", {"author_id": sb.bind("users").id})
+
+        with pytest.raises(ValueError, match="not been fed"):
+            sb.create(posts=5)
+        assert sb._generated == {}
+
+    def test_bind_rejects_bad_source(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match="SchemaRef or a fed table name"):
+            sb.bind(42)  # type: ignore[arg-type]
+
+    def test_bind_rejects_non_mapping_where(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match="mapping"):
+            sb.bind("users", where=[("country", "US")])  # type: ignore[arg-type]
+
+    def test_bind_rejects_non_str_where_keys(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(TypeError, match="field names"):
+            sb.bind("users", where={1: "US"})
+
+    def test_binding_reprs(self, sb: SchemaBuilder) -> None:
+        author = sb.bind("users")
+        assert isinstance(author, Binding)
+        assert repr(author) == "Binding('users')"
+
+        site = sb.bind("sites", where={"country": author.country})
+        assert repr(site).startswith("Binding('sites', where=")
+
+        column = author.id
+        assert isinstance(column, BoundColumn)
+        assert repr(column) == "BoundColumn('users'.'id')"
+
+    def test_binding_rejects_private_attrs(self, sb: SchemaBuilder) -> None:
+        author = sb.bind("users")
+        with pytest.raises(AttributeError, match="_private"):
+            _ = author._private
+
+
+class TestBindingErrors:
+    def test_no_matching_rows(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        sb.feed("sites", [{"id": 12, "country": "FR"}])
+        _define_posts(sb)
+
+        with pytest.raises(NoMatchingRowsError, match="sites"):
+            sb.create(posts=1)
+
+    def test_no_candidates_at_all(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", [])
+        sb.schema("posts", {"author_id": sb.bind("users").id})
+
+        with pytest.raises(NoMatchingRowsError, match="No candidate rows"):
+            sb.create(posts=1)
+
+    def test_null_bound_column(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", [{"id": None, "country": "US"}])
+        author = sb.bind("users")
+        sb.schema("posts", {"author_id": author.id})
+
+        with pytest.raises(NullBoundValueError, match="id"):
+            sb.create(posts=1)
+
+    def test_null_in_joined_column_is_not_a_no_match(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", [{"id": 1, "country": None}])
+        sb.feed("sites", SITE_ROWS)
+        author = sb.bind("users")
+        site = sb.bind("sites", where={"country": author.country})
+        sb.schema("posts", {"author_id": author.id, "site_id": site.id})
+
+        # a null join value is reported as a null column, not as "no match"
+        with pytest.raises(NullBoundValueError, match="country"):
+            sb.create(posts=1)
+
+    def test_circular_binding(self, sb: SchemaBuilder) -> None:
+        sb.feed("a", [{"k": 1}])
+        sb.feed("b", [{"k": 1}])
+        first = sb.bind("a")
+        second = sb.bind("b")
+        # introduce a cycle, mirroring the circular FK test
+        first._where["k"] = second.k
+        second._where["k"] = first.k
+        sb.schema("rows", {"x": first.k})
+
+        with pytest.raises(CircularBindingError, match="Circular binding"):
+            sb.create(rows=1)
+
+    def test_binding_errors_are_distinguishable(self, sb: SchemaBuilder) -> None:
+        for exc_type in (
+            NoMatchingRowsError,
+            NullBoundValueError,
+            CircularBindingError,
+        ):
+            assert issubclass(exc_type, BindingError)
+            assert issubclass(exc_type, ValueError)
+        assert (
+            len({NoMatchingRowsError, NullBoundValueError, CircularBindingError}) == 3
+        )
+
+    def test_missing_bound_column_raises_key_error(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        sb.schema("posts", {"email": sb.bind("users").email})
+
+        with pytest.raises(KeyError, match="email"):
+            sb.create(posts=1)
+
+    def test_failed_row_does_not_pollute_next_run(self) -> None:
+        sb = SchemaBuilder(Locale.EN, seed=SEED)
+        sb.feed("users", USER_ROWS)
+        sb.feed("sites", [row for row in SITE_ROWS if row["country"] == "FR"])
+        _define_posts(sb)
+
+        with pytest.raises(NoMatchingRowsError):
+            sb.create(posts=3)
+        # the failed row leaves no pinned bindings behind
+        assert sb._bound_rows == {}
+        assert sb._resolving_bindings == set()
+
+        # after feeding matching sites, the same builder recovers and
+        # every new row is bound consistently — nothing leaks from the
+        # failed run into the next posts
+        sb.feed("sites", SITE_ROWS)
+        recovered = sb.create(posts=10)
+
+        users_by_id = {row["id"]: row for row in USER_ROWS}
+        sites_by_id = {row["id"]: row for row in SITE_ROWS}
+        for post in recovered["posts"]:
+            author = users_by_id[post["author_id"]]
+            site = sites_by_id[post["site_id"]]
+            assert post["author_country"] == author["country"]
+            assert site["country"] == author["country"]
+            assert post["site_url"] == site["url"]
+
+    def test_clear_resets_binding_state(self, sb: SchemaBuilder) -> None:
+        sb.feed("users", USER_ROWS)
+        sb.feed("sites", SITE_ROWS)
+        _define_posts(sb)
+        sb.create(posts=2)
+        sb.clear()
+
+        assert sb._bound_rows == {}
+        assert sb._resolving_bindings == set()
+        # fed rows survive clear() but not reset()
+        assert sb._fed["users"] == USER_ROWS
+        sb.reset()
+        assert sb._fed == {}

@@ -36,12 +36,16 @@ from .enums import (
     VideoFile,
 )
 from .exceptions import (
+    BindingError,
+    CircularBindingError,
     FieldArityError,
     FieldError,
     FieldNameError,
     FieldsetError,
     LocaleError,
+    NoMatchingRowsError,
     NonEnumerableError,
+    NullBoundValueError,
     SchemaError,
 )
 from .locales import Locale
@@ -81,8 +85,10 @@ __all__ = [
     "BaseDataProvider",
     "BaseProvider",
     "BinaryFile",
+    "BindingError",
     "CardType",
     "Choice",
+    "CircularBindingError",
     "Code",
     "CompressedFile",
     "CountryCode",
@@ -117,7 +123,9 @@ __all__ = [
     # Exceptions:
     "LocaleError",
     "MimeType",
+    "NoMatchingRowsError",
     "NonEnumerableError",
+    "NullBoundValueError",
     "NumType",
     "Numeric",
     "Path",
