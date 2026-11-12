@@ -1,6 +1,7 @@
 In Development
 --------------
 
+* New `EmailListParser` class (and `validate_email_list` convenience function) for parsing a field containing a comma-separated list of email addresses incrementally, one input block at a time. Each successfully validated address is returned immediately with its normalized form and character range in the original field, and each invalid element is returned as a separate rejection with its own reason and range. Quoted strings, backslash escaping, and angle-bracket addresses can span blocks; an unclosed quote or angle bracket only resynchronizes at a caller-declared hard record boundary (`record_boundary=True`) so the next customer record is not swallowed.
 * Python 3.8 and 3.9 are no longer supported.
 * The `original` field of the returned validated email object incorrectly un-escaped the local part of the email address. Now it returns the original address, without any display name, as passed to validate_email.
 * add support python3.15

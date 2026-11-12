@@ -27,6 +27,9 @@ Key features:
   This is an opinionated library!
 * Normalizes email addresses (important for internationalized
   and quoted-string addresses! see below).
+* Can parse a field holding several comma-separated addresses
+  (including quoted display names with commas) incrementally with
+  per-address character ranges and independent error reasons.
 * Python type annotations are used.
 
 This is an opinionated library. You should definitely also consider using
@@ -151,6 +154,53 @@ The `validate_email` function also accepts the following keyword arguments
     `@example.com`), e.g. for validating Postfix aliases.
     
 `strict=False`: Set to `True` to perform additional syntax checks (currently only a local part length check). This should be used by mail service providers at address creation to ensure email addresses meet broad compatibility requirements.
+
+### Parsing a field with multiple email addresses
+
+A single field may contain several recipients separated by commas, and a
+legal display name can itself contain a comma when it is quoted. Use
+`EmailListParser` to parse such a field incrementally, one block (chunk) at a
+time. Each completed address is returned immediately; a consumed block is
+never requested again. Quoted strings, backslash escaping, and angle-bracket
+addresses are tracked across blocks, so they can span multiple chunks.
+
+```python
+from email_validator import EmailListParser, EmailListItem, EmailListRejection
+
+parser = EmailListParser(
+    allow_display_name=True,
+    check_deliverability=False,
+)
+
+for block in blocks:                 # blocks are read once and not retained
+    for result in parser.feed(block):
+        if isinstance(result, EmailListItem):
+            address = result.email.normalized          # normalized email
+            span = (result.start, result.end)           # range in the field
+        elif isinstance(result, EmailListRejection):
+            reason = result.reason                      # this item's own error
+            span = (result.start, result.end)           # range of the bad item
+
+for result in parser.close():          # flush the final address
+    ...
+```
+
+Every result has `start` and `end` character offsets (half-open) into the
+concatenation of the blocks. Successful results are `EmailListItem` objects
+holding the `ValidatedEmail` in `email`; failed results are
+`EmailListRejection` objects carrying an independent `reason`, so one bad
+recipient never blocks the others. A comma inside quotes or angle brackets is
+not treated as a separator.
+
+If a quoted string or angle bracket is not closed, it would otherwise swallow
+every following address. Pass `record_boundary=True` when a block ends at a
+hard record boundary: that is the only point at which the parser
+resynchronizes. The malformed record is rejected on its own and the next
+record starts in a clean state instead of being swallowed.
+
+For callers that already hold all of the blocks, `validate_email_list` is a
+convenience wrapper that takes an iterable of blocks (or `(block,
+record_boundary)` tuples) and returns all results at once.
 
 ### DNS timeout and cache
 

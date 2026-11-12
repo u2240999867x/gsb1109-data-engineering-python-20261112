@@ -4,12 +4,21 @@ from typing import TYPE_CHECKING
 from .exceptions import EmailNotValidError, EmailSyntaxError, EmailUndeliverableError
 from .types import ValidatedEmail
 from .validate_email import validate_email
+from .email_list import (
+    EmailListParser,
+    EmailListResult,
+    EmailListItem,
+    EmailListRejection,
+    validate_email_list,
+)
 from .version import __version__
 
 __all__ = ["validate_email",
            "ValidatedEmail", "EmailNotValidError",
            "EmailSyntaxError", "EmailUndeliverableError",
-           "caching_resolver", "__version__"]
+           "caching_resolver", "__version__",
+           "EmailListParser", "EmailListResult", "EmailListItem",
+           "EmailListRejection", "validate_email_list"]
 
 if TYPE_CHECKING:
     from .deliverability import caching_resolver
