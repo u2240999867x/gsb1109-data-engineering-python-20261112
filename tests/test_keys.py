@@ -1,9 +1,11 @@
+import functools
+
 import pytest
 
 from mimesis import keys
-from mimesis.exceptions import LocaleError
+from mimesis.exceptions import LocaleError, PipeCheckpointError
 from mimesis.locales import Locale
-from mimesis.random import random
+from mimesis.random import Random, random
 
 
 ROMANIZE_INPUT_PARAMETERS = [
@@ -531,3 +533,221 @@ def test_call_key_func_propagates_type_error_from_inside_key():
 def test_call_key_func_falls_back_to_single_argument():
     assert keys._call_key_func(str.strip, "  value  ", random) == "value"
     assert keys._call_key_func(lambda v: v.upper(), "value", random) == "VALUE"
+
+
+def test_call_key_func_with_keyword_only_random():
+    def key(value, *, random):
+        return f"{value}-{random.randint(1, 1)}"
+
+    assert keys._call_key_func(key, "value", random) == "value-1"
+
+
+def test_call_key_func_with_partial():
+    def key(value, random, suffix):
+        return f"{value}{suffix}{random.randint(1, 1)}"
+
+    partial_key = functools.partial(key, suffix="!")
+    assert keys._call_key_func(partial_key, "value", random) == "value!1"
+
+    partial_random = functools.partial(key, random=random, suffix="?")
+    assert keys._call_key_func(partial_random, "value", random) == "value?1"
+
+
+def test_call_key_func_with_decorated_function():
+    def key(value, *, random):
+        return f"{value}={random.randint(1, 1)}"
+
+    @functools.wraps(key)
+    def wrapper(*args, **kwargs):
+        return key(*args, **kwargs)
+
+    assert keys._call_key_func(wrapper, "value", random) == "value=1"
+
+
+def test_call_key_func_with_bound_method():
+    class Helper:
+        def key(self, value, *, random):
+            return f"{value}:{random.randint(1, 1)}"
+
+    assert keys._call_key_func(Helper().key, "value", random) == "value:1"
+
+
+def test_call_key_func_two_argument_type_error_raised_once():
+    calls = []
+
+    def key(value, random):
+        calls.append(value)
+        raise TypeError("boom")
+
+    with pytest.raises(TypeError, match="boom"):
+        keys._call_key_func(key, "value", random)
+
+    assert calls == ["value"]
+
+
+def test_pipe_resume_from_failed_stage():
+    log = []
+    should_fail = True
+
+    def stage_a(value, random):
+        log.append(("a", value))
+        return value + 1
+
+    def stage_b(value, random):
+        log.append(("b", value, random.randint(1, 1000)))
+        if should_fail:
+            raise RuntimeError("boom")
+        return value * 10
+
+    def stage_c(value):
+        log.append(("c", value))
+        return value
+
+    key = keys.pipe(stage_a, stage_b, stage_c)
+    rnd = Random(42)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        key(5, rnd)
+
+    checkpoint = key.checkpoint
+    assert checkpoint is not None
+    assert checkpoint.stage_index == 1
+    assert checkpoint.value == 6
+    assert checkpoint.random_state is not None
+
+    should_fail = False
+    result = key.resume(rnd)
+
+    assert result == 60
+    # The completed stage was not re-run, and the failed stage was retried
+    # with the value and the random state of its first entry.
+    assert log[0] == ("a", 5)
+    assert log[1] == log[2]
+    assert log[1][0] == "b" and log[1][1] == 6
+    assert log[3] == ("c", 60)
+    assert key.checkpoint is None
+
+
+def test_pipe_resume_through_new_call():
+    should_fail = True
+
+    def stage_a(value):
+        return value + 1
+
+    def stage_b(value):
+        if should_fail:
+            raise RuntimeError("boom")
+        return value * 10
+
+    key = keys.pipe(stage_a, stage_b)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        key(5, random)
+
+    should_fail = False
+    # The next call resumes the recorded run instead of starting over.
+    assert key(999, random) == 60
+    assert key.checkpoint is None
+
+
+def test_pipe_resume_without_checkpoint():
+    key = keys.pipe(str.upper)
+
+    with pytest.raises(PipeCheckpointError):
+        key.resume(random)
+
+
+def test_pipe_checkpoint_version_mismatch():
+    def stage_a(value, random):
+        return value + 1
+
+    def stage_b(value, random):
+        raise RuntimeError("boom")
+
+    key = keys.pipe(stage_a, stage_b)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        key(5, random)
+
+    checkpoint = key.checkpoint
+    assert checkpoint is not None
+
+    # The same chain accepts the checkpoint.
+    same_chain = keys.pipe(stage_a, stage_b, checkpoint=checkpoint)
+    assert same_chain.checkpoint is checkpoint
+
+    # A changed chain refuses it.
+    with pytest.raises(PipeCheckpointError):
+        keys.pipe(stage_a, str.upper, checkpoint=checkpoint)
+
+    with pytest.raises(PipeCheckpointError):
+        keys.pipe(stage_a, str.upper).attach(checkpoint)
+
+    with pytest.raises(PipeCheckpointError):
+        keys.pipe(stage_a, str.upper).resume(random, checkpoint=checkpoint)
+
+
+def test_nested_pipe_resume():
+    log = []
+    should_fail = True
+
+    def inner_stage_a(value, random):
+        log.append(("inner_a", value))
+        return value + 100
+
+    def inner_stage_b(value, random):
+        log.append(("inner_b", value, random.randint(1, 1000)))
+        if should_fail:
+            raise ValueError("inner boom")
+        return value * 2
+
+    def outer_stage_a(value, random):
+        log.append(("outer_a", value))
+        return value + 1
+
+    def outer_stage_c(value):
+        log.append(("outer_c", value))
+        return value
+
+    inner = keys.pipe(inner_stage_a, inner_stage_b)
+    outer = keys.pipe(outer_stage_a, inner, outer_stage_c)
+    rnd = Random(7)
+
+    with pytest.raises(ValueError, match="inner boom"):
+        outer(1, rnd)
+
+    assert outer.checkpoint is not None
+    assert outer.checkpoint.stage_index == 1
+    assert inner.checkpoint is not None
+    assert inner.checkpoint.stage_index == 1
+
+    should_fail = False
+    result = outer.resume(rnd)
+
+    assert result == 204
+    # Inner stages that completed were not re-run, and the failed inner
+    # stage was retried with the value and random state of first entry.
+    assert log[0] == ("outer_a", 1)
+    assert log[1] == ("inner_a", 2)
+    assert log[2] == log[3]
+    assert log[2][0] == "inner_b" and log[2][1] == 102
+    assert log[4] == ("outer_c", 204)
+    assert outer.checkpoint is None
+    assert inner.checkpoint is None
+
+
+def test_pipe_checkpoint_attributes():
+    def stage_a(value):
+        raise RuntimeError("boom")
+
+    key = keys.pipe(str.upper, stage_a)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        key("value", random)
+
+    checkpoint = key.checkpoint
+    assert checkpoint is not None
+    assert checkpoint.version == key.version
+    assert checkpoint.stage_index == 1
+    assert checkpoint.value == "VALUE"
+    assert repr(checkpoint).startswith("PipeCheckpoint(")

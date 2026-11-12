@@ -17,7 +17,7 @@ from mimesis.exceptions import (
     FieldsetError,
     SchemaError,
 )
-from mimesis.keys import maybe, romanize
+from mimesis.keys import maybe, pipe, romanize
 from mimesis.locales import Locale
 from mimesis.random import Random
 from mimesis.schema import Field, Fieldset, Schema, SchemaContext
@@ -153,6 +153,71 @@ def test_field_with_key_function_two_parameters(localized_field):
     _name, number = result.split("_")
     assert isinstance(result, str)
     assert 1 <= int(number) <= 100
+
+
+def test_field_with_key_function_keyword_only_random(localized_field):
+    def key_function(value, *, random):
+        return f"{value}_{random.randint(1, 100)}"
+
+    result = localized_field("person.name", key=key_function)
+    _name, number = result.split("_")
+    assert isinstance(result, str)
+    assert 1 <= int(number) <= 100
+
+
+def test_field_with_key_function_bound_method(localized_field):
+    class Helper:
+        def key_function(self, value, *, random):
+            return f"{value}_{random.randint(1, 100)}"
+
+    result = localized_field("person.name", key=Helper().key_function)
+    _name, number = result.split("_")
+    assert isinstance(result, str)
+    assert 1 <= int(number) <= 100
+
+
+def test_field_key_function_type_error_raised_once(localized_field):
+    calls = []
+
+    def key_function(value, random):
+        calls.append(value)
+        raise TypeError("boom")
+
+    with pytest.raises(TypeError, match="boom"):
+        localized_field("person.name", key=key_function)
+
+    assert len(calls) == 1
+
+
+def test_field_pipe_resume_with_new_field():
+    should_fail = True
+
+    def stage_a(value):
+        return value.strip()
+
+    def stage_b(value):
+        if should_fail:
+            raise RuntimeError("boom")
+        return value.upper()
+
+    key = pipe(stage_a, stage_b)
+
+    field = Field(seed=42)
+    with pytest.raises(RuntimeError, match="boom"):
+        field("word", key=key)
+
+    checkpoint = key.checkpoint
+    assert checkpoint is not None
+    assert checkpoint.stage_index == 1
+
+    should_fail = False
+    # The recorded progress can be handed to a newly created field
+    # with the same definition.
+    new_field = Field(seed=42)
+    result = new_field("word", key=key)
+
+    assert result == checkpoint.value.upper()
+    assert key.checkpoint is None
 
 
 @pytest.mark.parametrize(

@@ -647,6 +647,32 @@ The :func:`~mimesis.keys.pipe` function is compatible with all other key functio
 work with regular Python functions. It automatically handles functions that require a random
 instance as their second parameter (like :func:`~mimesis.keys.maybe`).
 
+Resuming a failed pipe
+~~~~~~~~~~~~~~~~~~~~~~
+
+If a stage of a pipe fails, the original exception propagates unchanged and the progress is
+recorded in the ``checkpoint`` attribute of the returned :class:`~mimesis.keys.PipeKey`.
+The run can later be resumed from the failed stage: stages that already completed are not
+executed again, and the failed stage receives the value and the random state captured when
+it was first entered — even when pipes are nested.
+
+.. code-block:: python
+
+    >>> key = keys.pipe(stage_a, stage_b, stage_c)
+    >>> try:
+    ...     field("price", key=key)
+    ... except RuntimeError:
+    ...     pass
+    >>> key.checkpoint  # doctest: +SKIP
+    PipeCheckpoint(stage_index=1, version=...)
+    >>> # Resume through a newly created field with the same definition:
+    >>> new_field = Field(seed=42)
+    >>> new_field("price", key=key)  # doctest: +SKIP
+
+The checkpoint can also be handed to another pipe built from the same transform chain by
+passing it as ``keys.pipe(..., checkpoint=checkpoint)``. Resuming with a chain whose version
+has changed raises :class:`mimesis.exceptions.PipeCheckpointError`.
+
 Accessing the Random Instance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -670,6 +696,11 @@ Here's an example:
 
     >>> field("email", key=foobarify)
     'fooany1925@gmail.com'
+
+The ``random`` parameter may also be declared as keyword-only
+(``def key(value, *, random)``), and the key function may be a partially
+bound callable, a decorated function, or a bound method — it is always
+called according to the signature it actually exposes.
 
 
 Transforming Items with ``map()`` and ``SchemaContext``

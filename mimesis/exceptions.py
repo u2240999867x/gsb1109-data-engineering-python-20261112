@@ -105,3 +105,7 @@ class AliasesTypeError(TypeError):
             "The 'aliases' attribute must be a non-nested dictionary where "
             "keys are aliases and values are the corresponding field names."
         )
+
+
+class PipeCheckpointError(ValueError):
+    """Raised when a piped key chain cannot be resumed from a checkpoint."""
