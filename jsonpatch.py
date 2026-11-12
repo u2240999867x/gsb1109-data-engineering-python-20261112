@@ -116,6 +116,26 @@ class JsonPatchTestFailed(JsonPatchException, AssertionError):
     """ A Test operation failed """
 
 
+class ReversalConflict(JsonPatchException):
+    """Raised when a revert patch cannot be built safely.
+
+    This is the case if an array row that the correction ticket touched can
+    no longer be uniquely located by its stable business key in the current
+    document, or if a value the ticket wrote has since been changed there, so
+    that reverting it would overwrite someone else's change. The whole ticket
+    is left untouched in that case.
+
+    The individual problems are collected in :attr:`conflicts`, one human
+    readable string each.
+    """
+
+    def __init__(self, conflicts, *args):
+        self.conflicts = list(conflicts)
+        message = '; '.join(self.conflicts) if self.conflicts else \
+            'the correction ticket cannot be reverted'
+        super().__init__(message, *args)
+
+
 def multidict(ordered_pairs):
     """Convert duplicate keys values to lists."""
     # read all values into lists
@@ -215,6 +235,70 @@ def make_patch(src, dst, pointer_cls=JsonPointer, generate_test_ops=False):
 
     return JsonPatch.from_diff(src, dst, pointer_cls=pointer_cls,
                                generate_test_ops=generate_test_ops)
+
+
+def make_revert_patch(ticket, doc, current=None, key_members=None,
+                      pointer_cls=JsonPointer):
+    """Builds an RFC 6902 patch that reverts a data correction ticket.
+
+    The ticket is the JSON Patch that was applied to carry out the
+    correction. Only the changes of that ticket are reverted: values that
+    others added to other columns (or other parts of the document) after the
+    ticket was delivered are kept.
+
+    Rows of arrays are not located by their index, which can shift when rows
+    are inserted in between, but by stable business keys. ``key_members`` maps
+    the pointer of an array to the member names that identify a row, e.g.
+    ``{'/items': ('id',)}``. The key members of every row the ticket touches
+    are stored in the revert credential, so the credential contains only the
+    involved fragments, never the whole customer document.
+
+    :param ticket: The correction ticket, as an iterable of operation dicts,
+                   a :class:`JsonPatch` or a raw JSON string.
+    :type ticket: JsonPatch or iterable or str
+
+    :param doc: The document as it was immediately before the ticket was
+                applied. The ticket must apply cleanly to it.
+    :type doc: object
+
+    :param current: The document at the time of the revert, which may contain
+                    rows inserted in between and changes made by others. It
+                    defaults to a copy of ``doc`` with the ticket applied,
+                    i.e. a revert with no intervening changes.
+    :type current: object
+
+    :param key_members: Maps the path of each array whose rows have a stable
+                        business key to the member names forming that key.
+                        Arrays without an entry are located by index.
+    :type key_members: dict[str, Iterable[str]]
+
+    :param pointer_cls: JSON pointer class to use.
+    :type pointer_cls: Type[JsonPointer]
+
+    :return: A patch whose ``test`` operations first guard the identity and
+             the values that will be restored, followed by the operations
+             that restore the pre-ticket state of the touched fragments.
+    :rtype: JsonPatch
+
+    :raises ReversalConflict: if a touched row cannot be located uniquely by
+                              its business key, or a value the ticket wrote
+                              has since been changed; the ticket is then left
+                              untouched.
+    """
+    if isinstance(ticket, (str, bytes)):
+        ticket = JsonPatch.from_string(ticket, pointer_cls=pointer_cls)
+    elif not isinstance(ticket, JsonPatch):
+        ticket = JsonPatch(ticket, pointer_cls=pointer_cls)
+
+    if current is None:
+        current = ticket.apply(doc)
+
+    key_members = {
+        path: tuple(members) for path, members in (key_members or {}).items()
+    }
+    builder = _RevertPatchBuilder(ticket, doc, current, key_members,
+                                  pointer_cls)
+    return builder.build()
 
 
 def path_split(path, pointer_cls=JsonPointer):
@@ -1546,6 +1630,870 @@ class _AppendDiffBuilder(DiffBuilder):
                          'value': item[len(old_item):]})
         else:
             super()._item_replaced(path, key, item, old_item)
+
+
+class _RevertPatchBuilder:
+    """Builds the revert patch of a correction ticket.
+
+    The ticket is replayed on a copy of the pre-ticket document while every
+    touched location is recorded, together with the business key of the array
+    row it belongs to. Each touched location ends up with a pre-ticket and a
+    post-ticket value: the revert restores the former and guards the latter
+    with a ``test``, so a value someone else changed makes the patch fail
+    before it changes anything.
+
+    Rows of keyed arrays are followed by their business key rather than by
+    their index, so rows inserted in between do not confuse the revert.
+    Structural row changes (add, remove, replace, move) are recorded
+    explicitly and restored next to their pre-ticket keyed neighbours.
+    """
+
+    def __init__(self, ticket, doc, current, key_members, pointer_cls):
+        self.ticket = ticket
+        self.doc = doc
+        self.current = current
+        # array path -> tuple of member names that form the business key
+        self.key_members = key_members
+        self.pointer_cls = pointer_cls
+        # recorded changes, structural row changes first and leaf changes
+        # after them, in the order they were discovered
+        self.changes = []
+        self.conflicts = []
+
+    def build(self, verify=True):
+        self._record()
+        if self.conflicts:
+            raise ReversalConflict(self.conflicts)
+        operations = self._operations()
+        if self.conflicts:
+            raise ReversalConflict(self.conflicts)
+        patch = JsonPatch(operations, pointer_cls=self.pointer_cls)
+        if verify:
+            self._verify(patch)
+            if self.conflicts:
+                raise ReversalConflict(self.conflicts)
+        return patch
+
+    # -- recording -------------------------------------------------------
+
+    def _add_change(self, change):
+        self.changes.append(change)
+
+    def _record(self):
+        """Replays the ticket and records what it touched.
+
+        Row-level changes of keyed arrays are derived from a comparison of
+        the pre- and post-ticket arrays by business key, which is robust
+        against transient states inside the ticket (a row copied and re-keyed
+        by a later operation, for example). Everything else is recorded by
+        the paths the operations touch and resolved to pre/post values.
+        """
+        self._post_doc = self.ticket.apply(copy.deepcopy(self.doc))
+        touched = self._collect_touched()
+        if self.conflicts:
+            return
+        # business keys of every keyed row in which a member (possibly in a
+        # nested array) was touched; a whole-row content change of such a row
+        # is then recognized as caused by the member change, not a replace
+        self._row_coordinates = set()
+        for record in touched:
+            for array_path, key_fragment in record['chain']:
+                if key_fragment is None:
+                    continue
+                if record['row_level'] and \
+                        array_path == record['array_path']:
+                    # the pointer targets this whole row itself
+                    continue
+                self._row_coordinates.add(
+                    (array_path, self._key_token(key_fragment)))
+        self._record_row_changes()
+        if self.conflicts:
+            return
+        self._record_leaf_changes(touched)
+
+    def _collect_touched(self):
+        """Replays the ticket and records every pointer its mutating
+        operations touch, in ticket order.
+
+        The keyed row a pointer belongs to is resolved against the live
+        document immediately before the operation runs, so it keeps the right
+        business identity even when earlier operations shifted indices.
+        """
+        after = copy.deepcopy(self.doc)
+        touched = []
+        for operation in self.ticket._ops:
+            name = type(operation).__name__
+            if name == 'TestOperation':
+                continue
+            pointers = []
+            if name in ('AddOperation', 'RemoveOperation',
+                        'ReplaceOperation', 'CopyOperation'):
+                pointers = [operation.pointer]
+            elif name == 'MoveOperation':
+                from_ptr = operation._from_pointer()
+                pointers = [from_ptr]
+                if operation.pointer != from_ptr:
+                    pointers.append(operation.pointer)
+            else:
+                self.conflicts.append(
+                    "cannot revert a custom operation at '{0}'".format(
+                        operation.location))
+                continue
+
+            for pointer in pointers:
+                if not pointer.parts:
+                    self.conflicts.append(
+                        'the ticket replaces or moves the whole document, '
+                        'which cannot be reverted while keeping other '
+                        'changes')
+                    continue
+                touched.append(self._row_record(pointer, after))
+            after = operation.apply(after)
+        return touched
+
+    def _row_record(self, pointer, live_doc):
+        """The touched-pointer record with every keyed row it passes
+        through, resolved against a document state where the pointer is
+        valid. ``array_path``/``key_fragment`` describe the innermost keyed
+        row; ``chain`` lists all keyed levels from the outermost array in."""
+        parts = pointer.parts
+        record = {
+            'parts': tuple(parts),
+            'array_path': None,
+            'key_fragment': None,
+            'row_level': False,
+            'chain': [],
+        }
+        # a row occupies parts[:depth]; its index token is parts[depth-1].
+        # depth == len(parts) means the pointer targets the whole row.
+        for depth in range(len(parts), 0, -1):
+            if not self._is_index(parts[depth - 1]):
+                continue
+            array_path = path_join(parts[:depth - 1], self.pointer_cls)
+            members = self.key_members.get(array_path)
+            if not members:
+                continue
+            exists, row = self._peek(
+                live_doc, self.pointer_cls.from_parts(parts[:depth]))
+            key_fragment = self._key_of(row, members) \
+                if exists and isinstance(row, Mapping) else None
+            record['chain'].append((array_path, key_fragment))
+            if record['array_path'] is None:
+                # the first match walking outwards is the innermost keyed row
+                record['array_path'] = array_path
+                record['key_fragment'] = key_fragment
+                record['row_level'] = depth == len(parts)
+        return record
+
+    def _ordered_rows(self, before_array, after_array, members):
+        """The business-key tokens of rows that occur in both arrays in the
+        same relative order (their longest common subsequence)."""
+        before_tokens = [
+            self._key_token(key_fragment) for key_fragment in
+            (self._key_of(row, members) for row in before_array)
+            if key_fragment is not None
+        ]
+        after_tokens = [
+            self._key_token(key_fragment) for key_fragment in
+            (self._key_of(row, members) for row in after_array)
+            if key_fragment is not None
+        ]
+        # longest common subsequence by dynamic programming
+        lengths = [[0] * (len(after_tokens) + 1)
+                   for _ in range(len(before_tokens) + 1)]
+        for i in range(len(before_tokens) - 1, -1, -1):
+            for j in range(len(after_tokens) - 1, -1, -1):
+                if before_tokens[i] == after_tokens[j]:
+                    lengths[i][j] = lengths[i + 1][j + 1] + 1
+                else:
+                    lengths[i][j] = max(lengths[i + 1][j],
+                                       lengths[i][j + 1])
+        common = set()
+        i = j = 0
+        while i < len(before_tokens) and j < len(after_tokens):
+            if before_tokens[i] == after_tokens[j]:
+                common.add(before_tokens[i])
+                i += 1
+                j += 1
+            elif lengths[i + 1][j] >= lengths[i][j + 1]:
+                i += 1
+            else:
+                j += 1
+        return common
+
+    def _record_row_changes(self):
+        """Compares each keyed array before and after the ticket and
+        records the rows that were added, removed, replaced or moved."""
+        for array_path, members in self.key_members.items():
+            parts = path_split(array_path, self.pointer_cls)
+            try:
+                before_array = self._resolve(self.doc, parts)
+                after_array = self._resolve(self._post_doc, parts)
+            except JsonPointerException:
+                # the array itself was added or removed as a member; that is
+                # reverted as an object-level leaf change instead
+                continue
+            if not isinstance(before_array, MutableSequence) or \
+                    not isinstance(after_array, MutableSequence):
+                continue
+            before_rows = self._index_rows(before_array, members, array_path)
+            after_rows = self._index_rows(after_array, members, array_path)
+            if self.conflicts:
+                return
+            # rows that keep their relative order are not relocations even
+            # if removing other rows changes their index
+            stayed = self._ordered_rows(before_array, after_array, members)
+
+            for token, (index, row) in after_rows.items():
+                if token not in before_rows:
+                    self._add_change({
+                        'kind': 'add-row',
+                        'parts': tuple(parts) + (index,),
+                        'array_path': array_path,
+                        'key_fragment': self._token_key(token),
+                        'pre_exists': False,
+                        'pre_value': None,
+                        'post_exists': True,
+                        'post_value': copy.deepcopy(row),
+                    })
+
+            for token, (index, row) in before_rows.items():
+                if token not in after_rows:
+                    self._add_change({
+                        'kind': 'remove-row',
+                        'parts': tuple(parts) + (index,),
+                        'array_path': array_path,
+                        'key_fragment': self._token_key(token),
+                        'pre_exists': True,
+                        'pre_value': copy.deepcopy(row),
+                        'post_exists': False,
+                        'post_value': None,
+                    })
+
+            for token, (post_index, post_row) in after_rows.items():
+                if token not in before_rows:
+                    continue
+                pre_index, pre_row = before_rows[token]
+                key_fragment = self._token_key(token)
+                if pre_index != post_index and token not in stayed:
+                    self._add_change({
+                        'kind': 'relocation',
+                        'parts': tuple(parts) + (pre_index,),
+                        'array_path': array_path,
+                        'key_fragment': key_fragment,
+                        'pre_exists': True,
+                        'pre_value': copy.deepcopy(pre_row),
+                        'post_exists': True,
+                        'post_value': copy.deepcopy(post_row),
+                    })
+                if not _json_equal(pre_row, post_row) and \
+                        (array_path, token) not in self._row_coordinates:
+                    # the row content changed without a touched member
+                    # pointer, i.e. the ticket replaced the whole row
+                    self._add_change({
+                        'kind': 'replace-row',
+                        'parts': tuple(parts) + (pre_index,),
+                        'array_path': array_path,
+                        'key_fragment': key_fragment,
+                        'pre_exists': True,
+                        'pre_value': copy.deepcopy(pre_row),
+                        'post_exists': True,
+                        'post_value': copy.deepcopy(post_row),
+                    })
+
+    def _index_rows(self, array, members, array_path):
+        """Maps each row's business-key token to (index, row), reporting a
+        conflict if a key is not unique or a row lacks its key members."""
+        indexed = {}
+        for index, row in enumerate(array):
+            key_fragment = self._key_of(row, members)
+            if key_fragment is None:
+                self.conflicts.append(
+                    "a row of array '{0}' lacks its business key members "
+                    "{1}".format(array_path, members))
+                return {}
+            token = self._key_token(key_fragment)
+            if token in indexed:
+                self.conflicts.append(
+                    "business key {0} is not unique in array '{1}'".format(
+                        key_fragment, array_path))
+                return {}
+            indexed[token] = (index, row)
+        return indexed
+
+    def _record_leaf_changes(self, touched):
+        """Records the pre/post values of the touched non-row locations.
+
+        Pointers at a whole row are structural changes handled elsewhere, as
+        are locations inside a row that was added, removed or replaced
+        wholesale, since restoring the whole row covers them.
+        """
+        structural = {
+            (change['array_path'],
+             self._key_token(change['key_fragment']))
+            for change in self.changes
+            if change.get('kind') in
+            ('add-row', 'remove-row', 'replace-row')
+        }
+        seen = set()
+        for record in touched:
+            key = record['parts']
+            if key in seen:
+                continue
+            seen.add(key)
+            if record['row_level']:
+                continue
+            entry = {
+                'parts': key,
+                'array_path': record['array_path'],
+                'key_fragment': record['key_fragment'],
+            }
+            if entry['array_path'] is not None:
+                if entry['key_fragment'] is None:
+                    continue
+                if (entry['array_path'],
+                        self._key_token(entry['key_fragment'])) in structural:
+                    continue
+            _, pre_exists, pre_value = self._locate_value(
+                entry, self.doc)
+            _, post_exists, post_value = self._locate_value(
+                entry, self._post_doc)
+            if self.conflicts:
+                return
+            if pre_exists == post_exists and (
+                    not pre_exists or
+                    _json_equal(pre_value, post_value)):
+                continue
+            entry.update(
+                pre_exists=pre_exists,
+                pre_value=copy.deepcopy(pre_value),
+                post_exists=post_exists,
+                post_value=copy.deepcopy(post_value),
+            )
+            self.changes.append(entry)
+
+    @staticmethod
+    def _key_token(key_fragment):
+        return tuple(sorted(
+            (member, json.dumps(value, sort_keys=True))
+            for member, value in key_fragment.items()))
+
+    def _token_key(self, token):
+        return {member: json.loads(serialized)
+                for member, serialized in token}
+
+    def _locate_value(self, entry, doc):
+        """Locates an entry in doc and returns (pointer, exists, value),
+        re-finding every keyed row on its path by business key. A location
+        that cannot be resolved (the row did not exist in this document
+        state) reads as absent rather than raising."""
+        try:
+            pointer = self._resolve_chain(doc, entry['parts'])
+            if self.conflicts:
+                return None, False, None
+            exists, value = self._peek(doc, pointer)
+        except JsonPointerException:
+            return None, False, None
+        return pointer, exists, value
+
+    # -- building the operations ----------------------------------------
+
+    def _operations(self):
+        tests = []
+        leaf_mutations = []
+        structural = []
+
+        for change in self.changes:
+            if 'kind' in change:
+                row_tests, mutation = self._structural_operations(change)
+                tests.extend(row_tests)
+                if mutation is not None:
+                    structural.append(mutation)
+                continue
+
+            pointer = self._locate_in_current(change)
+            if self._last_conflict_is_row():
+                continue
+            tests.extend(self._guard(change, pointer))
+            leaf_mutations.extend(self._restore(change, pointer))
+
+        # structural mutations of one array are applied from the highest
+        # current index downwards, so an earlier mutation does not shift the
+        # index a later one is pointed at
+        structural.sort(key=lambda item: (item['_array_path'],
+                                          -item['_index']))
+        mutations = leaf_mutations + [
+            {key: value for key, value in item.items()
+             if not key.startswith('_')}
+            for item in structural
+        ]
+        return tests + mutations
+
+    def _structural_operations(self, change):
+        kind = change['kind']
+        array_path = change['array_path']
+        members = self.key_members[array_path]
+        array_parts = path_split(array_path, self.pointer_cls)
+        array = self._current_array(array_parts)
+        if not isinstance(array, MutableSequence):
+            self.conflicts.append(
+                "array '{0}' no longer exists in the current document".format(
+                    array_path))
+            return [], None
+
+        matches = self._matching_rows(array, change['key_fragment'])
+
+        if kind == 'add-row':
+            # the ticket added this row; revert removes it again
+            if len(matches) != 1:
+                self._row_conflict(change, array_path, matches)
+                return [], None
+            index = matches[0]
+            if not _json_equal(array[index], change['post_value']):
+                self.conflicts.append(
+                    "the row with business key {0} of array '{1}' was "
+                    "changed after the ticket".format(
+                        change['key_fragment'], array_path))
+                return [], None
+            path = self._row_path(change, index, self.current)
+            if self._last_conflict_is_row():
+                return [], None
+            return ([{'op': 'test', 'path': path,
+                      'value': copy.deepcopy(change['post_value'])}],
+                    {'op': 'remove', 'path': path,
+                     '_array_path': array_path, '_index': index})
+
+        if kind == 'remove-row':
+            if matches:
+                self.conflicts.append(
+                    "the row with business key {0} removed from array '{1}' "
+                    "by the ticket exists again".format(
+                        change['key_fragment'], array_path))
+                return [], None
+            index = self._insertion_point(change, array)
+            if self._last_conflict_is_row():
+                return [], None
+            tests = []
+            if index < len(array):
+                # guard the row that will be shifted to the right by the
+                # re-insertion, so a changed layout fails before any change
+                slot_path = self._row_path(change, index, self.current)
+                tests.append({'op': 'test', 'path': slot_path,
+                              'value': copy.deepcopy(array[index])})
+            path = self._row_path(change, index, self.current)
+            if self._last_conflict_is_row():
+                return [], None
+            operation = {'op': 'add', 'path': path,
+                         'value': copy.deepcopy(change['pre_value']),
+                         '_array_path': array_path, '_index': index}
+            return tests, operation
+
+        if kind == 'replace-row':
+            if len(matches) != 1:
+                self._row_conflict(change, array_path, matches)
+                return [], None
+            index = matches[0]
+            if not _json_equal(array[index], change['post_value']):
+                self.conflicts.append(
+                    "the row with business key {0} of array '{1}' was "
+                    "changed after the ticket".format(
+                        change['key_fragment'], array_path))
+                return [], None
+            path = self._row_path(change, index, self.current)
+            if self._last_conflict_is_row():
+                return [], None
+            return ([{'op': 'test', 'path': path,
+                      'value': copy.deepcopy(change['post_value'])}],
+                    {'op': 'replace', 'path': path,
+                     'value': copy.deepcopy(change['pre_value']),
+                     '_array_path': array_path, '_index': index})
+
+        # relocation: move the row back to its original keyed position
+        if len(matches) != 1:
+            self._row_conflict(change, array_path, matches)
+            return [], None
+        index = matches[0]
+        if not _json_equal(array[index], change['post_value']):
+            self.conflicts.append(
+                "the row with business key {0} of array '{1}' was changed "
+                "after the ticket".format(change['key_fragment'],
+                                          array_path))
+            return [], None
+        desired = self._insertion_point(change, array)
+        if self._last_conflict_is_row():
+            return [], None
+        if desired == index:
+            # the row is already back between its original neighbours
+            return [], None
+        # the move removes the source first; a destination behind it is then
+        # one index lower in the shortened array
+        move_index = desired - 1 if desired > index else desired
+        source_path = self._row_path(change, index, self.current)
+        target_path = self._row_path(change, move_index, self.current)
+        if self._last_conflict_is_row():
+            return [], None
+        tests = [{'op': 'test', 'path': source_path,
+                  'value': copy.deepcopy(array[index])}]
+        if desired < len(array):
+            # guard the row that the insertion shifts to the right; the
+            # tests run before the move, so this uses its current index
+            guard_path = self._row_path(change, desired, self.current)
+            tests.append({'op': 'test', 'path': guard_path,
+                          'value': copy.deepcopy(array[desired])})
+        return tests, {'op': 'move',
+                       'from': source_path,
+                       'path': target_path,
+                       '_array_path': array_path, '_index': index}
+
+    def _insertion_point(self, change, current_array):
+        """The current index at which a removed or relocated row has to be
+        inserted to sit between its pre-ticket keyed neighbours."""
+        array_path = change['array_path']
+        members = self.key_members[array_path]
+        before_array = self._resolve(self.doc,
+                                     path_split(array_path,
+                                                self.pointer_cls))
+        original = self._matching_rows(before_array,
+                                       change['key_fragment'])
+        if len(original) != 1:
+            self._row_conflict(change, array_path, original)
+            return 0
+        original_index = original[0]
+        predecessor = self._neighbour_key(before_array, original_index, -1,
+                                          members)
+        successor = self._neighbour_key(before_array, original_index, 1,
+                                        members)
+        if predecessor is not None:
+            pred_matches = self._matching_rows(current_array, predecessor)
+            if len(pred_matches) == 1:
+                return pred_matches[0] + 1
+        if successor is not None:
+            succ_matches = self._matching_rows(current_array, successor)
+            if len(succ_matches) == 1:
+                return succ_matches[0]
+        if not current_array and not predecessor and not successor:
+            return 0
+        self.conflicts.append(
+            "cannot determine the original position of the row with "
+            "business key {0} in array '{1}'".format(
+                change['key_fragment'], array_path))
+        return 0
+
+    def _neighbour_key(self, before_array, index, direction, members):
+        """The business key of the row next to ``index`` in the pre-ticket
+        array, or None if there is no row on that side."""
+        pos = index + direction
+        while 0 <= pos < len(before_array):
+            key_fragment = self._key_of(before_array[pos], members)
+            if key_fragment is not None:
+                return copy.deepcopy(key_fragment)
+            pos += direction
+        return None
+
+    def _matching_rows(self, array, key_fragment):
+        """The indices of the rows whose business key matches."""
+        return [
+            index for index, row in enumerate(array)
+            if isinstance(row, Mapping) and
+            all(member in row and _json_equal(row[member], value)
+                for member, value in key_fragment.items())
+        ]
+
+    def _row_conflict(self, change, array_path, matches):
+        if matches:
+            reason = 'business key {0} matches {1} rows'.format(
+                change['key_fragment'], len(matches))
+        else:
+            reason = 'no row has business key {0}'.format(
+                change['key_fragment'])
+        self.conflicts.append(
+            "cannot uniquely locate the row of array '{0}': {1}".format(
+                array_path, reason))
+
+    def _last_conflict_is_row(self):
+        return bool(self.conflicts) and \
+            'cannot uniquely locate the row' in self.conflicts[-1]
+
+    def _row_path(self, change, index, doc):
+        """The path of the row of ``change`` at its matched ``index`` in
+        ``doc``, relocating every keyed outer row on its path."""
+        parts = change['parts']
+        chain = self._chain_for(parts, self.doc)
+        chain_map = {array_path: key for array_path, key in chain}
+        node = doc
+        located = []
+        for depth, token in enumerate(parts[:-1], start=1):
+            array_path = path_join(parts[:depth - 1], self.pointer_cls)
+            key_fragment = chain_map.get(array_path)
+            if key_fragment is not None and isinstance(node,
+                                                       MutableSequence):
+                matches = self._matching_rows(node, key_fragment)
+                if len(matches) != 1:
+                    self._row_conflict(change, array_path, matches)
+                    return None
+                token = matches[0]
+            located.append(token)
+            node = self._step(node, token)
+        located.append(index)
+        return self.pointer_cls.from_parts(tuple(located)).path
+
+    def _locate_in_current(self, change):
+        """Resolves the pointer of a leaf change against the current
+        document, re-finding every keyed array row on its path by business
+        key."""
+        return self._resolve_chain(self.current, change['parts'])
+
+    def _chain_for(self, parts, doc):
+        """The (array path, business key) of every keyed-array row that
+        ``parts`` passes through, in ``doc``'s coordinates."""
+        chain = []
+        node = doc
+        for depth, token in enumerate(parts, start=1):
+            array_path = path_join(parts[:depth - 1], self.pointer_cls)
+            members = self.key_members.get(array_path)
+            if members is not None and isinstance(node, MutableSequence) and \
+                    self._is_index(token):
+                index = int(token)
+                if not 0 <= index < len(node):
+                    break
+                key_fragment = self._key_of(node[index], members)
+                if key_fragment is None:
+                    chain.append((array_path, None))
+                else:
+                    chain.append((array_path, copy.deepcopy(key_fragment)))
+            node = self._step(node, token)
+            if node is None:
+                break
+        return chain
+
+    def _resolve_chain(self, doc, parts):
+        """Resolves ``parts`` against ``doc``, replacing the index of every
+        keyed-array row with the index of the row carrying the same business
+        key, so rows inserted in between do not shift the target."""
+        chain = self._chain_for(parts, self.doc)
+        chain_map = {array_path: key for array_path, key in chain}
+        node = doc
+        located = []
+        for depth, token in enumerate(parts, start=1):
+            array_path = path_join(parts[:depth - 1], self.pointer_cls)
+            key_fragment = chain_map.get(array_path)
+            if key_fragment is not None and isinstance(node,
+                                                       MutableSequence):
+                matches = self._matching_rows(node, key_fragment)
+                if len(matches) != 1:
+                    self._row_conflict(
+                        {'key_fragment': key_fragment}, array_path, matches)
+                    return self.pointer_cls.from_parts(parts)
+                index = matches[0]
+                located.append(index)
+                node = node[index]
+            else:
+                located.append(token)
+                node = self._step(node, token)
+        return self.pointer_cls.from_parts(tuple(located))
+
+    def _current_array(self, parts, doc=None):
+        """The array at ``parts`` (in pre-ticket coordinates) in ``doc``
+        (the current document by default), relocating keyed rows on its
+        path. Returns None if a keyed row on the path cannot be located."""
+        target = self.current if doc is None else doc
+        try:
+            pointer = self._resolve_chain(target, tuple(parts))
+            if self.conflicts:
+                return None
+            return pointer.resolve(target)
+        except JsonPointerException:
+            self.conflicts.append(
+                "the array at '{0}' can no longer be reached in the current "
+                "document".format(
+                    path_join(tuple(parts), self.pointer_cls)))
+            return None
+
+    @staticmethod
+    def _step(node, token):
+        """Descends one pointer part, tolerating a missing location."""
+        try:
+            if isinstance(node, Mapping):
+                return node[token]
+            return node[int(token)]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+
+    def _guard(self, change, pointer):
+        """The test operation that guards the restoring mutation."""
+        exists, value = self._peek(self.current, pointer)
+        if change['post_exists']:
+            if not exists:
+                self.conflicts.append(
+                    "'{0}' was removed after the ticket, but the ticket set "
+                    "it to {1!r}".format(pointer.path, change['post_value']))
+                return []
+            if not _json_equal(value, change['post_value']):
+                self.conflicts.append(
+                    "the value at '{0}' was changed after the ticket: "
+                    "expected {1!r}, found {2!r}".format(
+                        pointer.path, change['post_value'], value))
+                return []
+            return [{'op': 'test', 'path': pointer.path,
+                     'value': copy.deepcopy(change['post_value'])}]
+
+        if exists:
+            self.conflicts.append(
+                "'{0}' did not exist after the ticket, but now holds "
+                "{1!r}".format(pointer.path, value))
+        return []
+
+    def _restore(self, change, pointer):
+        """The operation that restores the pre-ticket value."""
+        path = pointer.path
+        if not change['pre_exists']:
+            if change['post_exists']:
+                return [{'op': 'remove', 'path': path}]
+            return []
+        if not change['post_exists']:
+            return [{'op': 'add', 'path': path,
+                     'value': copy.deepcopy(change['pre_value'])}]
+        return [{'op': 'replace', 'path': path,
+                 'value': copy.deepcopy(change['pre_value'])}]
+
+    # -- verification and helpers ---------------------------------------
+
+    def _verify(self, patch):
+        """Independent backstop before handing the patch out.
+
+        Two checks are made. First, a patch built against the exact
+        post-ticket document must reproduce the pre-ticket document, which
+        proves the ticket is reverted and nothing else when no one else
+        changed anything. Second, the delivered patch must apply to the
+        current document and put every touched fragment back into its
+        pre-ticket state, which proves the key-based relocation and the test
+        guards still hold after intervening changes. A patch that does not
+        apply cleanly (including one whose tests fail) is rejected as a
+        conflict.
+        """
+        post_builder = _RevertPatchBuilder(
+            self.ticket, self.doc, copy.deepcopy(self._post_doc),
+            self.key_members, self.pointer_cls)
+        try:
+            post_patch = post_builder.build(verify=False)
+        except ReversalConflict as ex:
+            self.conflicts.extend(ex.conflicts)
+            return
+        try:
+            roundtrip = post_patch.apply(copy.deepcopy(self._post_doc))
+        except JsonPatchException as ex:
+            self.conflicts.append(
+                'the generated revert patch does not revert the ticket: '
+                '{0}'.format(ex))
+            return
+        if not _json_equal(roundtrip, self.doc):
+            self.conflicts.append(
+                'the generated revert patch does not reproduce the '
+                'pre-ticket document')
+            return
+
+        try:
+            reverted = patch.apply(copy.deepcopy(self.current))
+        except JsonPatchException as ex:
+            self.conflicts.append(
+                'the generated revert patch does not apply to the current '
+                'document: {0}'.format(ex))
+            return
+
+        for change in self.changes:
+            self._verify_change(change, reverted)
+            if self.conflicts:
+                return
+
+    def _verify_change(self, change, reverted):
+        kind = change.get('kind')
+        if kind is not None:
+            array_path = change['array_path']
+            array = self._current_array(
+                path_split(array_path, self.pointer_cls), reverted)
+            if not isinstance(array, MutableSequence):
+                self.conflicts.append(
+                    "array '{0}' no longer exists after the revert".format(
+                        array_path))
+                return
+            matches = self._matching_rows(array, change['key_fragment'])
+            if kind == 'add-row':
+                if matches:
+                    self.conflicts.append(
+                        "the row with business key {0} was not removed by "
+                        "the revert".format(change['key_fragment']))
+                return
+            if len(matches) != 1:
+                self._row_conflict(change, array_path, matches)
+                return
+            if kind in ('remove-row', 'replace-row', 'relocation') and \
+                    not _json_equal(array[matches[0]], change['pre_value']):
+                self.conflicts.append(
+                    "the revert does not restore the row with business key "
+                    "{0}".format(change['key_fragment']))
+            return
+
+        pointer = self._resolve_chain(reverted, change['parts'])
+        if self.conflicts:
+            return
+        exists, value = self._peek(reverted, pointer)
+        if exists != change['pre_exists'] or (
+                exists and not _json_equal(value, change['pre_value'])):
+            self.conflicts.append(
+                "the revert does not restore '{0}' to its pre-ticket "
+                "value".format(pointer.path))
+
+    def _key_of(self, row, members):
+        """The business-key fragment of a row, or None if a member is
+        missing."""
+        return _business_key(row, members)
+
+    @staticmethod
+    def _peek(doc, pointer):
+        """Reads the value at ``pointer`` without mutating the document.
+
+        Returns ``(False, None)`` for a missing member or array element,
+        unlike resolving the pointer, which would make a defaultdict add the
+        member or raise for an out-of-range index.
+        """
+        try:
+            container, part = pointer.to_last(doc)
+        except JsonPointerException:
+            return False, None
+        if part is None:
+            return True, container
+        if isinstance(container, Mapping):
+            if part not in container:
+                return False, None
+        elif isinstance(container, MutableSequence):
+            if not isinstance(part, int) or part < 0 or part >= len(container):
+                return False, None
+        try:
+            return True, container[part]
+        except (KeyError, IndexError):
+            return False, None
+
+    def _resolve(self, doc, parts):
+        """Resolves parts in doc, letting pointer errors propagate."""
+        return self.pointer_cls.from_parts(parts).resolve(doc)
+
+    @staticmethod
+    def _is_index(part):
+        if part == '-':
+            return True
+        return isinstance(part, int) or (
+            isinstance(part, str) and
+            bool(JsonPointer._RE_ARRAY_INDEX.fullmatch(part)))
+
+
+def _business_key(row, members):
+    """The business-key fragment of a row, or None if a member is missing."""
+    if not isinstance(row, Mapping):
+        return None
+    try:
+        return {member: row[member] for member in members}
+    except KeyError:
+        return None
 
 
 def _positional_cost(old, new):

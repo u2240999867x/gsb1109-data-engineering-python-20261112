@@ -19,8 +19,8 @@ from typing_extensions import assert_type
 import jsonpatch
 from jsonpatch import (InvalidJsonPatch, JsonPatch, JsonPatchConflict,
                        JsonPatchException, JsonPatchPathNotFound,
-                       JsonPatchTestFailed,
-                       PatchOperation)
+                       JsonPatchTestFailed, PatchOperation,
+                       ReversalConflict)
 
 doc = {'foo': 'bar'}
 ops = [{'op': 'add', 'path': '/baz', 'value': 'qux'}]
@@ -33,6 +33,15 @@ assert_type(jsonpatch.apply_patch(doc, json.dumps(ops)), Any)
 assert_type(jsonpatch.apply_patch(doc, json.dumps(ops).encode()), Any)
 assert_type(jsonpatch.make_patch(doc, {}), JsonPatch)
 assert_type(jsonpatch.make_patch(doc, {}, generate_test_ops=True), JsonPatch)
+revert = jsonpatch.make_revert_patch(
+    JsonPatch(ops), doc, current=doc, key_members={'/rows': ('id',)})
+assert_type(revert, JsonPatch)
+assert_type(jsonpatch.make_revert_patch(json.dumps(ops), doc), JsonPatch)
+try:
+    jsonpatch.make_revert_patch(JsonPatch(ops), doc)
+except ReversalConflict as ex:
+    assert_type(ex, ReversalConflict)
+    assert_type(ex.conflicts, list[str])
 assert_type(jsonpatch.path_split('/foo/0'), tuple[str, ...])
 assert_type(jsonpatch.path_split('/foo', pointer_cls=JsonPointer), tuple[str, ...])
 assert_type(jsonpatch.path_join(['foo', 0]), str)

@@ -4051,6 +4051,327 @@ class StandardAppendIsolationTests(unittest.TestCase):
                          {'message': 'canonical'})
 
 
+class MakeRevertPatchTests(unittest.TestCase):
+    """Tests for jsonpatch.make_revert_patch, the revert credential of a
+    data correction ticket."""
+
+    keys = {'/items': ('id',)}
+
+    def revert(self, ticket, doc, current=None, keys=keys):
+        return jsonpatch.make_revert_patch(
+            ticket, copy.deepcopy(doc),
+            None if current is None else copy.deepcopy(current), keys)
+
+    def test_replaces_a_column_and_guards_the_ticket_value(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        patch = self.revert(ticket, doc)
+        self.assertEqual(patch.patch, [
+            {'op': 'test', 'path': '/items/0/v', 'value': 9},
+            {'op': 'replace', 'path': '/items/0/v', 'value': 1},
+        ])
+        self.assertEqual(patch.apply(ticket.apply(doc)), doc)
+
+    def test_locates_the_row_by_business_key_after_insertions(self):
+        doc = {'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(0, {'id': 'z', 'v': 0})
+        patch = self.revert(ticket, doc, current)
+        # the row moved from index 0 to index 1; the path follows its key
+        self.assertEqual([op['path'] for op in patch],
+                         ['/items/1/v', '/items/1/v'])
+        result = patch.apply(current)
+        self.assertEqual(result, {
+            'items': [{'id': 'z', 'v': 0},
+                      {'id': 'a', 'v': 1},
+                      {'id': 'b', 'v': 2}],
+        })
+
+    def test_keeps_values_others_added_to_other_columns(self):
+        doc = {'items': [{'id': 'a', 'v': 1, 'note': None}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'][0]['note'] = 'filled by someone else'
+        patch = self.revert(ticket, doc, current)
+        result = patch.apply(copy.deepcopy(current))
+        self.assertEqual(result['items'][0],
+                         {'id': 'a', 'v': 1, 'note': 'filled by someone else'})
+        # the other column never enters the revert credential
+        self.assertNotIn('filled by someone else', patch.to_string())
+
+    def test_conflict_when_the_same_column_was_changed_by_another_party(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'][0]['v'] = 77
+        with self.assertRaises(jsonpatch.ReversalConflict) as caught:
+            self.revert(ticket, doc, current)
+        self.assertTrue(any('changed after the ticket' in reason
+                            for reason in caught.exception.conflicts))
+
+    def test_conflict_when_the_business_key_cannot_be_found(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'][0]['id'] = 'renamed'
+        with self.assertRaises(jsonpatch.ReversalConflict) as caught:
+            self.revert(ticket, doc, current)
+        self.assertTrue(any('no row has business key' in reason
+                            for reason in caught.exception.conflicts))
+
+    def test_conflict_when_the_business_key_is_not_unique(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].append({'id': 'a', 'v': 5})
+        with self.assertRaises(jsonpatch.ReversalConflict) as caught:
+            self.revert(ticket, doc, current)
+        self.assertTrue(any('matches 2 rows' in reason
+                            for reason in caught.exception.conflicts))
+
+    def test_revert_of_an_added_row(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'add', 'path': '/items/-',
+             'value': {'id': 'b', 'v': 2}},
+        ])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(0, {'id': 'z', 'v': 0})
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current),
+                         {'items': [{'id': 'z', 'v': 0},
+                                    {'id': 'a', 'v': 1}]})
+
+    def test_revert_of_a_removed_row_keeps_inserted_rows(self):
+        doc = {'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2},
+                         {'id': 'c', 'v': 3}]}
+        ticket = jsonpatch.JsonPatch([{'op': 'remove', 'path': '/items/1'}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(1, {'id': 'x', 'v': 99})
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current), {
+            'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2},
+                      {'id': 'x', 'v': 99}, {'id': 'c', 'v': 3}],
+        })
+
+    def test_revert_of_a_moved_row(self):
+        doc = {'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2},
+                         {'id': 'c', 'v': 3}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'move', 'from': '/items/0', 'path': '/items/2'}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(0, {'id': 'z', 'v': 0})
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current), {
+            'items': [{'id': 'z', 'v': 0}, {'id': 'a', 'v': 1},
+                      {'id': 'b', 'v': 2}, {'id': 'c', 'v': 3}],
+        })
+
+    def test_revert_of_a_copied_and_rekeyed_row(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'copy', 'from': '/items/0', 'path': '/items/-'},
+            {'op': 'replace', 'path': '/items/1/id', 'value': 'b'},
+        ])
+        current = ticket.apply(copy.deepcopy(doc))
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current), doc)
+
+    def test_object_member_add_remove_and_replace(self):
+        doc = {'meta': {'a': 1, 'b': 2}, 'keep': {'x': 10}}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'replace', 'path': '/meta/a', 'value': 100},
+            {'op': 'remove', 'path': '/meta/b'},
+            {'op': 'add', 'path': '/meta/c', 'value': 3},
+        ])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['keep']['y'] = 20
+        patch = self.revert(ticket, doc, current, keys={})
+        self.assertEqual(patch.apply(current),
+                         {'meta': {'a': 1, 'b': 2},
+                          'keep': {'x': 10, 'y': 20}})
+        self.assertNotIn('keep', patch.to_string())
+
+    def test_object_move_is_reverted_by_add_and_replace(self):
+        doc = {'src': [1, 2], 'dst': None}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'move', 'from': '/src', 'path': '/dst'}])
+        patch = self.revert(ticket, doc, keys={})
+        self.assertEqual(patch.apply(ticket.apply(doc)), doc)
+
+    def test_test_guards_block_a_tampered_application(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 9}])
+        patch = self.revert(ticket, doc)
+        tampered = ticket.apply(copy.deepcopy(doc))
+        tampered['items'][0]['v'] = 3
+        snapshot = copy.deepcopy(tampered)
+        with self.assertRaises(jsonpatch.JsonPatchTestFailed):
+            patch.apply(tampered)
+        # the failing guard runs before any mutation, so nothing changes
+        self.assertEqual(tampered, snapshot)
+
+    def test_credential_carries_only_the_involved_fragments(self):
+        doc = {'items': [
+            {'id': 'a', 'secret': 'shh', 'v': 1},
+            {'id': 'b', 'secret': 'no-look', 'v': 2},
+        ]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/items/0/v', 'value': 5}])
+        patch = self.revert(ticket, doc)
+        blob = patch.to_string()
+        self.assertNotIn('shh', blob)
+        self.assertNotIn('no-look', blob)
+        self.assertNotIn('"b"', blob)
+
+    def test_composite_business_key(self):
+        keys = {'/rows': ('tenant', 'code')}
+        doc = {'rows': [{'tenant': 't1', 'code': 'c1', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/rows/0/v', 'value': 8}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['rows'].insert(0, {'tenant': 't2', 'code': 'c9', 'v': 0})
+        patch = self.revert(ticket, doc, current, keys=keys)
+        self.assertEqual(patch.apply(current)['rows'][1],
+                         {'tenant': 't1', 'code': 'c1', 'v': 1})
+
+    def test_nested_keyed_arrays(self):
+        keys = {'/orders': ('oid',), '/orders/0/items': ('sku',)}
+        doc = {'orders': [{'oid': 'o1', 'items': [
+            {'sku': 's1', 'qty': 1}, {'sku': 's2', 'qty': 2}]}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/orders/0/items/1/qty', 'value': 5}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['orders'].insert(0, {'oid': 'new', 'items': []})
+        current['orders'][1]['items'].insert(0, {'sku': 's0', 'qty': 9})
+        current['orders'][1]['items'][2]['extra'] = 'keep'
+        patch = self.revert(ticket, doc, current, keys=keys)
+        result = patch.apply(current)
+        self.assertEqual(result['orders'][0], {'oid': 'new', 'items': []})
+        self.assertEqual(result['orders'][1]['items'][2],
+                         {'sku': 's2', 'qty': 2, 'extra': 'keep'})
+
+    def test_whole_row_replace(self):
+        doc = {'items': [{'id': 'a', 'v': 1, 'tag': 'old'}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'replace', 'path': '/items/0',
+             'value': {'id': 'a', 'v': 9, 'tag': 'new'}},
+        ])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(0, {'id': 'z'})
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current), {
+            'items': [{'id': 'z'},
+                      {'id': 'a', 'v': 1, 'tag': 'old'}],
+        })
+
+    def test_test_only_ticket_produces_an_empty_patch(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'test', 'path': '/items/0/v', 'value': 1}])
+        patch = self.revert(ticket, doc)
+        self.assertEqual(list(patch), [])
+
+    def test_accepts_a_serialized_ticket(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = [{'op': 'replace', 'path': '/items/0/v', 'value': 9}]
+        patch = jsonpatch.make_revert_patch(
+            json.dumps(ticket), doc, key_members=self.keys)
+        self.assertEqual(patch.apply(jsonpatch.apply_patch(doc, ticket)), doc)
+
+    def test_escaped_pointer_tokens(self):
+        doc = {'a/b': {'c~d': 1}}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/a~1b/c~0d', 'value': 2}])
+        patch = self.revert(ticket, doc, keys={})
+        self.assertEqual(patch.apply(ticket.apply(doc)), doc)
+
+    def test_unkeyed_arrays_fall_back_to_positional_paths(self):
+        doc = {'values': [1, 2, 3]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '/values/1', 'value': 9}])
+        patch = self.revert(ticket, doc, keys={})
+        self.assertEqual(patch.patch, [
+            {'op': 'test', 'path': '/values/1', 'value': 9},
+            {'op': 'replace', 'path': '/values/1', 'value': 2},
+        ])
+
+    def test_structural_change_of_an_unkeyed_array_is_rejected(self):
+        # without business keys a removal shifts indices, so the original
+        # element can no longer be located safely; a conflict is raised rather
+        # than a patch that would corrupt the array
+        doc = {'values': ['a', 'b', 'c']}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'remove', 'path': '/values/1'}])
+        with self.assertRaises(jsonpatch.ReversalConflict):
+            self.revert(ticket, doc, keys={})
+
+    def test_repeated_touch_is_restored_to_the_original_value(self):
+        doc = {'items': [{'id': 'a', 'v': 1}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'replace', 'path': '/items/0/v', 'value': 9},
+            {'op': 'replace', 'path': '/items/0/v', 'value': 10},
+        ])
+        patch = self.revert(ticket, doc)
+        self.assertEqual(patch.apply(ticket.apply(doc)), doc)
+
+    def test_added_and_removed_row_members(self):
+        doc = {'items': [{'id': 'a', 'v': 1, 'note': 'x'}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'remove', 'path': '/items/0/note'},
+            {'op': 'add', 'path': '/items/0/flag', 'value': True},
+        ])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].insert(0, {'id': 'z'})
+        patch = self.revert(ticket, doc, current)
+        self.assertEqual(patch.apply(current),
+                         {'items': [{'id': 'z'},
+                                    {'id': 'a', 'v': 1, 'note': 'x'}]})
+
+    def test_combined_move_and_edit_of_one_row(self):
+        doc = {'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2},
+                         {'id': 'c', 'v': 3}]}
+        ticket = jsonpatch.JsonPatch([
+            {'op': 'replace', 'path': '/items/0/v', 'value': 9},
+            {'op': 'move', 'from': '/items/0', 'path': '/items/2'},
+        ])
+        patch = self.revert(ticket, doc)
+        self.assertEqual(patch.apply(ticket.apply(copy.deepcopy(doc))), doc)
+
+    def test_replacing_the_whole_document_is_a_conflict(self):
+        doc = {'items': []}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'replace', 'path': '', 'value': {'other': 1}}])
+        with self.assertRaises(jsonpatch.ReversalConflict):
+            self.revert(ticket, doc)
+
+    def test_removed_row_that_reappeared_is_a_conflict(self):
+        doc = {'items': [{'id': 'a', 'v': 1}, {'id': 'b', 'v': 2}]}
+        ticket = jsonpatch.JsonPatch([{'op': 'remove', 'path': '/items/0'}])
+        current = ticket.apply(copy.deepcopy(doc))
+        current['items'].append({'id': 'a', 'v': 99})
+        with self.assertRaises(jsonpatch.ReversalConflict) as caught:
+            self.revert(ticket, doc, current)
+        self.assertTrue(any('exists again' in reason
+                            for reason in caught.exception.conflicts))
+
+    def test_move_across_two_keyed_arrays(self):
+        keys = {'/a': ('id',), '/b': ('id',)}
+        doc = {'a': [{'id': 'x', 'v': 1}], 'b': [{'id': 'y', 'v': 2}]}
+        ticket = jsonpatch.JsonPatch(
+            [{'op': 'move', 'from': '/a/0', 'path': '/b/-'}])
+        patch = self.revert(ticket, doc, keys=keys)
+        self.assertEqual(patch.apply(ticket.apply(copy.deepcopy(doc))), doc)
+
+
 def load_tests(loader, tests, pattern):
     """ Adds the doctests of jsonpatch to the tests of this module """
     tests.addTests(doctest.DocTestSuite(jsonpatch))

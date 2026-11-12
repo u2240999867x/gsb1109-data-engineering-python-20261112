@@ -33,6 +33,24 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Reverting a correction ticket
+-----------------------------
+`make_revert_patch(ticket, doc, current=None, key_members=None)` builds the
+RFC 6902 patch that reverts a correction ticket. `doc` is the document the
+ticket was applied to and `current` the document at revert time, which may
+contain rows inserted in between and changes made by others; it defaults to
+the ticket applied to `doc`.
+
+`key_members` maps each array whose rows have a stable business key to the
+member names forming that key, e.g. `{'/items': ('id',)}`. Rows are located
+by that key rather than by index, so inserted rows do not shift the target.
+The patch starts with `test` operations guarding the values it restores, so
+a value another party changed (or a key that is missing or not unique) makes
+it fail before changing anything; in that case `make_revert_patch` raises
+`ReversalConflict`, whose `conflicts` attribute lists each problem. The
+returned patch contains only the involved fragments, never the whole
+document.
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as
