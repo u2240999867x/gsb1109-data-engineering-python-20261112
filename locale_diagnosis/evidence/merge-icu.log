@@ -1,0 +1,8 @@
+===== probe: merge-icu (pid=25395) =====
+shard-A built under en_US.UTF-8: ['Andrei', 'anton', 'Борис', 'Мария']
+shard-B built under ru_RU.UTF-8: ['Борис', 'Сергей', 'Andrei', 'Anna']
+backend=icu
+merged: ['Andrei', 'anton', 'Борис', 'Борис', 'Мария', 'Сергей', 'Andrei', 'Anna']
+split duplicates: {'Andrei': [0, 6]}
+shard-A inversions under merge rule: 0
+shard-B inversions under merge rule: 1

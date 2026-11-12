@@ -1,0 +1,16 @@
+===== partition P1: identical build rules, one shard mis-ordered =====
+platform=Darwin 27.0 python=3.12.13
+ShardManifest(shard='P1/shard-A', locale='en_US.UTF-8', backend='icu', engine_version='fake-1.0', natsort_version='0.1.dev1+ge9a3a2a30', alg=48, dumb_at_build=False, key_fingerprint='84ce6dae6090b1e2', physically_sorted=True)
+ShardManifest(shard='P1/shard-B', locale='en_US.UTF-8', backend='icu', engine_version='fake-1.0', natsort_version='0.1.dev1+ge9a3a2a30', alg=48, dumb_at_build=False, key_fingerprint='84ce6dae6090b1e2', physically_sorted=False)
+verdict: REORDER-ONLY: P1/shard-B
+  - all key-defining manifest fields and fingerprints match
+  - stored keys are valid; physical order broken in ['P1/shard-B']
+
+===== partition P2: ICU/CLDR changed between shard builds =====
+platform=Darwin 27.0 python=3.12.13
+ShardManifest(shard='P2/shard-A', locale='en_US.UTF-8', backend='icu', engine_version='fake-1.0', natsort_version='0.1.dev1+ge9a3a2a30', alg=48, dumb_at_build=False, key_fingerprint='84ce6dae6090b1e2', physically_sorted=True)
+ShardManifest(shard='P2/shard-B', locale='en_US.UTF-8', backend='icu', engine_version='fake-2.0', natsort_version='0.1.dev1+ge9a3a2a30', alg=48, dumb_at_build=False, key_fingerprint='0366fa1d70d672cb', physically_sorted=True)
+verdict: REGENERATE-ALL-KEYS
+  - field 'engine_version' differs: 'fake-1.0' != 'fake-2.0'
+  - field 'key_fingerprint' differs: '84ce6dae6090b1e2' != '0366fa1d70d672cb'
+

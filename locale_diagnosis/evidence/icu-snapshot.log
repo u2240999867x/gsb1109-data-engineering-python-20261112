@@ -1,0 +1,12 @@
+===== probe: icu-snapshot (pid=25393) =====
+backend=icu (fake_icu=fake-1.0)
+key before rule change : (b'\x00\x01\x00a\x00\x01\x00n\x01\x01\x00n\x01\x01\x00a\x01',)
+same func after change : (b'\x00\x01\x00a\x00\x01\x00n\x01\x01\x00n\x01\x01\x00a\x01',)
+fresh func after change: (b'\x00\x02\x00a\x00\x02\x00n\x01\x02\x00n\x01\x02\x00a\x01',)
+stale output frozen at creation: True
+fresh output follows new rules: True
+collator creation audit (id, locale, script_order):
+  #1 loc=C.UTF-8 script_order=('latin', 'cyrillic')
+  #2 loc=en_US.UTF-8 script_order=('latin', 'cyrillic')
+  #3 loc=en_US.UTF-8 script_order=('cyrillic', 'latin')
+dumb_sort() on ICU backend: False

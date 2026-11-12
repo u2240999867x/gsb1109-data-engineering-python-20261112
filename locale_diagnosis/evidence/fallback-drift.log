@@ -1,0 +1,8 @@
+===== probe: fallback-drift (pid=25391) =====
+backend=system-locale-fallback
+get_strxfrm() is locale.strxfrm: True
+key under en_US : ('7××7\x01\x01\x01\x01\x01\x01\x0e\x01\x01\x01\x01V˚˚T',)
+same func under ru_RU: ('8GG8\x01\x02\x02\x02\x02\x01\x08\x01\x01\x01\x01ȉȢȢȈ',)
+fresh func under ru_RU: ('8GG8\x01\x02\x02\x02\x02\x01\x08\x01\x01\x01\x01ȉȢȢȈ',)
+stale output changed after setlocale: True
+stale call == fresh call (rule read at compare time): True

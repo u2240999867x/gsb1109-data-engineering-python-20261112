@@ -1,0 +1,6 @@
+===== probe: dumb-baked (pid=25392) =====
+backend=system-locale-fallback
+dumb_sort() under C at keygen: True
+C-baked key('Apple')  : ('77ăăăă¹¹ff\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x0e\x01\x0e\x01\x0e\x01\x0e\x01TTΌΎΌΎɿʂķĹ',)
+de-baked key('Apple') : ('7ăă¹f\x01\x01\x01\x01\x01\x01\x01\x0e\x01\x01\x01\x01\x01VΌΌɿķ',)
+C-baked keeps groupletters structure after switching to de_DE: True

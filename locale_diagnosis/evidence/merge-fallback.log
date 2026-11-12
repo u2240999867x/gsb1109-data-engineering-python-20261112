@@ -1,0 +1,8 @@
+===== probe: merge-fallback (pid=25394) =====
+shard-A built under en_US.UTF-8: ['Борис', 'Мария', 'Andrei', 'anton']
+shard-B built under ru_RU.UTF-8: ['Andrei', 'Anna', 'Борис', 'Сергей']
+backend=system-locale-fallback
+merged: ['Борис', 'Мария', 'Andrei', 'Andrei', 'Anna', 'Борис', 'Сергей', 'anton']
+split duplicates: {'Борис': [0, 5]}
+shard-A inversions under merge rule: 0
+shard-B inversions under merge rule: 1
