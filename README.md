@@ -33,6 +33,34 @@ See the [tutorial](https://python-json-patch.readthedocs.io/en/latest/tutorial.h
 for examples.
 Both sender and receiver must support the extension.
 
+Offline batch merge
+-------------------
+`jsonmerge` merges RFC 6902 patches that several offline peers produce from
+the same JSON baseline. Feed batches to `PatchMerger` in any order, more
+than once; each batch carries an `id`, optional `parents`, and operations
+with stable `seq` numbers. The merge is deterministic: every receive order,
+and two mergers joined with `absorb()`, yield the same document, the same
+conflict set and a canonical patch that replays against the common baseline.
+
+Array rows are tracked by identity rather than value, concurrent inserts
+into the same gap are ordered by batch id and sequence number, and
+conflicting operations are withheld while independent rows still commit.
+
+```python
+from jsonmerge import PatchMerger
+
+merger = PatchMerger({'items': [1, 1]})
+merger.receive({'id': 'a', 'operations': [
+    {'op': 'add', 'path': '/items/1', 'value': 2}]})
+merger.receive({'id': 'b', 'operations': [
+    {'op': 'add', 'path': '/items/1', 'value': 3}]})
+result = merger.merge()
+result.document          # {'items': [1, 2, 3, 1]}
+result.conflicts         # []
+result.canonical_patch   # RFC 6902 patch: baseline -> result.document
+```
+
+
 Type hints
 ----------
 jsonpatch ships type stubs (in the `jsonpatch-stubs` directory, as
@@ -51,6 +79,7 @@ Running tests
 -------------
     pip install -r requirements.txt -r requirements-dev.txt
     python tests.py
+    python jsonmerge_tests.py
 
 Running external tests
 ----------------------

@@ -11,6 +11,7 @@ PACKAGE = 'jsonpatch'
 MODULES = (
         'jsonpatch',
         'jsonpatch_cli',
+        'jsonmerge',
 )
 
 with open('requirements.txt') as f:
@@ -61,8 +62,9 @@ setup(name=PACKAGE,
       py_modules=MODULES,
       # jsonpatch is a single-file module, which can't be marked as typed
       # with py.typed (PEP 561), so its type stubs are a stub-only package
-      packages=['jsonpatch-stubs'],
-      package_data={'jsonpatch-stubs': ['*.pyi']},
+      packages=['jsonpatch-stubs', 'jsonmerge-stubs'],
+      package_data={'jsonpatch-stubs': ['*.pyi'],
+                    'jsonmerge-stubs': ['*.pyi']},
       entry_points={
           'console_scripts': [
               'jsondiff = jsonpatch_cli:jsondiff_main',

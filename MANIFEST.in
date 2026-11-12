@@ -9,6 +9,8 @@ include doc/Makefile
 include doc/requirements.txt
 include makefile
 include property_tests.py
+include jsonmerge.py
+include jsonmerge_tests.py
 include pytest.ini
 include ext_tests.py
 include typetests/usage.py

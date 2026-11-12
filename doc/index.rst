@@ -24,6 +24,7 @@ supported. Tests are run on both CPython and PyPy.
 
    tutorial
    mod-jsonpatch
+   mod-jsonmerge
    commandline
    RFC 6902 <https://datatracker.ietf.org/doc/html/rfc6902>
 
