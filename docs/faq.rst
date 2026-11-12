@@ -1,0 +1,154 @@
+Frequently Asked Questions
+==========================
+
+Why does detect() return None for encoding?
+--------------------------------------------
+
+chardet returns ``None`` when the data appears to be binary rather than
+text: when more than about 1% of the bytes are control characters, or
+when a known binary file signature is found, in which case ``mime_type``
+names the format. Sparse nulls in otherwise ASCII text are tolerated,
+as in ``find -print0`` output.
+
+.. code-block:: python
+
+   result = chardet.detect(b"\x00\x01\x02\x03")
+   # {'encoding': None, 'confidence': 0.95, 'language': None, 'mime_type': 'application/octet-stream'}
+
+How do I increase accuracy?
+----------------------------
+
+- **Provide more data.** The default limit of 200,000 bytes is generous
+  and most detections converge well within that.  If you are passing very
+  short strings (under a few hundred bytes), providing more data may help.
+- **Restrict the encoding era.** By default, chardet considers all
+  supported encodings. If you know your data only uses modern web
+  encodings, pass ``encoding_era=EncodingEra.MODERN_WEB`` to narrow the
+  candidate set and reduce false positives.
+- **Use detect_all().** If the top result is wrong, the correct encoding
+  may be the second candidate. :func:`chardet.detect_all` returns all
+  candidates ranked by confidence.
+- **Use encoding filters.** If you know exactly which encodings are
+  possible, pass ``include_encodings`` to restrict the candidate set.
+  Alternatively, use ``exclude_encodings`` to remove known false positives.
+- **Pass prefer_superset=True when decoding.** Detection examines at most
+  the first 200 KB, and only a superset encoding is guaranteed to decode
+  bytes beyond that window; the remap makes the result decode-safe.  The
+  default (``False``) skips the renaming and reports the detected
+  encoding under its own name --- note it is not a promise of the
+  *smallest* matching encoding, since detection may natively choose a
+  superset that fits the data better.  ``prefer_superset=True`` will
+  become the default in chardet 8.0.
+
+How is chardet different from charset-normalizer?
+--------------------------------------------------
+
+`charset-normalizer <https://github.com/jawah/charset_normalizer>`_ is
+an alternative encoding detector.  The design difference comes first,
+because the numbers follow from it: charset-normalizer decodes
+candidate encodings and scores the decoded text for "mess" and
+coherence, with no trained models.  chardet scores raw bytes against
+per-language bigram models inside a staged pipeline (structure,
+validity, statistics).  Each choice has a cost the other avoids:
+chardet's compiled wheel is about 1 MB (665 KB pure), and the bigram
+models are 576 KB of that, so they are most of the pure wheel and
+about half of the compiled one, against charset-normalizer's roughly
+250 KB, and
+chardet improves by retraining where charset-normalizer improves by
+refining heuristics.
+Credit where due on packaging: charset-normalizer proved the
+compiled-wheel pattern for this problem space, shipping optional
+mypyc-compiled wheels with a pure-Python fallback in 2022, years
+before chardet 7 took the same approach.  They have since replaced
+mypyc entirely with Cython, and the speed they recovered with that
+switch is what prompted chardet's own Cython experiments; chardet now
+compiles fifteen modules with mypyc and one scoring kernel with
+Cython.
+
+The measured differences:
+
+- **Accuracy:** chardet achieves 99.7% vs charset-normalizer's 86.6% on
+  the same test suite --- 90.8% for charset-normalizer once the
+  BOM-less utf-7 files it documents as out of scope are set aside (see
+  :doc:`performance`).
+- **Speed:** chardet leads everywhere except the far tail --- 1.3x in
+  aggregate (3,125 vs 2,438 files/s), 2.0x at the median (0.14 vs
+  0.28ms), 1.5x at p90 and 1.6x at p95, with a worst case 3.1x lower
+  (10.8 vs 33.6ms). charset-normalizer keeps p99 (2.41 vs our 3.22ms),
+  a gap concentrated in legacy CJK where their p99 is 1.57ms against
+  our 6.96ms. See :doc:`performance`.
+- **Accuracy convention:** our 99.7% credits supersets (Windows-1252 for
+  ISO-8859-1); scored on exact matches only it is 82.4% against
+  charset-normalizer's 78.2%. Both columns are published, but we
+  consider the superset the correct answer: detection reads at most the
+  first 200 KB, and only the superset is guaranteed to decode the rest
+  of the file --- the same reasoning behind the WHATWG/W3C Encoding
+  Standard's rule that browsers decode ``ascii`` and ``iso-8859-1``
+  content as ``windows-1252``. The strict gap is the convention, not
+  the detector: with superset remapping disabled
+  (``prefer_superset=False``) chardet scores 91.8% strict, still ahead
+  of charset-normalizer. See :doc:`performance`.
+- **Memory:** chardet uses 2.5x less peak memory (28.2 vs 71.0 MiB) and
+  1.6x less RSS. Per ``detect()`` call the ordering reverses ---
+  charset-normalizer allocates 58 KiB at the median against chardet's
+  544 KiB, but its p99 grows 14x to 784 KiB while chardet's rises to
+  917 KiB. See :doc:`performance` for the full distribution.
+- **Language detection:** chardet detects language with 93.0% accuracy vs
+  charset-normalizer's 54.8%.
+- **Binary files and MIME types:** both detectors decline binary input
+  (``encoding=None``), but chardet also identifies *what* the file is:
+  every result carries a ``mime_type``, matched against 40+ magic-number
+  signatures for images, audio/video, archives, documents, executables,
+  and fonts, plus ``text/html``, ``text/xml``, and ``text/x-python`` for
+  markup (see :doc:`supported-mime-types`).  charset-normalizer offers
+  ``is_binary()``, a yes/no answer with no type identification.
+
+How is chardet different from cchardet?
+----------------------------------------
+
+`cchardet <https://github.com/faust-streaming/faust-cchardet>`_ wraps
+Mozilla's uchardet C/C++ library. Key differences:
+
+- **Accuracy:** chardet achieves 99.7% vs cchardet's 60.1%.
+- **Speed:** cchardet 3.2.0 is 1.3x faster in aggregate (0.79s vs
+  1.00s across 3,138 files) and holds the better tail (p99 2.14ms vs
+  our 3.22ms), but chardet's worst case is 2.3x lower (10.8 vs 25.4ms).
+- **Memory:** chardet's peak footprint is 2.3x smaller (28.2 vs
+  64.5 MiB traced) with lower RSS (160 vs 187 MiB).
+- **Encoding breadth:** chardet supports 49 more encodings than cchardet,
+  including EBCDIC, Mac, Baltic, and BOM-less UTF-16/32.
+- **Binary files:** chardet declines binary input with a ``mime_type``
+  identifying the format; cchardet has no binary handling at all.
+- **Dependencies:** chardet has zero runtime dependencies and a
+  pure-Python fallback; its compiled wheels are optional and the sdist
+  builds without a C compiler. cchardet requires a C compiler to build
+  from source.
+
+Is chardet thread-safe?
+-------------------------
+
+:func:`chardet.detect` and :func:`chardet.detect_all` are fully
+thread-safe and can be called concurrently from any number of threads.
+
+:class:`~chardet.UniversalDetector` instances are **not** thread-safe.
+Create one instance per thread when using the streaming API.
+
+``UniversalDetector`` uses the same detection pipeline as ``detect()``
+and ``detect_all()``, so results are identical regardless of which API
+you use.
+
+Does chardet work on PyPy?
+---------------------------
+
+Yes. chardet's pure-Python wheel works on PyPy without modification.
+The optional compiled builds (mypyc and Cython) are CPython-only; PyPy
+uses the pure-Python code path automatically, and pays nothing for their
+existence --- the compiled scoring kernel is the only consumer of the
+data layout it introduces, so an interpreted install takes the same path
+it always did.
+
+PyPy is best judged by percentile rather than throughput. Its median
+detection (0.22ms) is close to compiled CPython, but its p99 is
+72--77ms against 2.8--3.0ms, because the JIT never warms up on rare,
+large inputs. On typical documents it is competitive with the compiled
+wheel; on a corpus with a heavy tail it is several times slower overall.

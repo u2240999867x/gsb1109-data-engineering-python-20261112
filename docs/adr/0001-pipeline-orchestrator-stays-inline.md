@@ -1,0 +1,5 @@
+# Pipeline orchestrator stays inline
+
+`pipeline/orchestrator.py:_run_pipeline_core` runs on every `detect()`, `detect_all()`, and `UniversalDetector.close()` call, so even with mypyc compilation, Python function-call overhead matters. Refactors that extract its phases (early-exit chain, candidate filtering, scoring + post-processing) into helper functions trade real performance for marginal locality gains, and the alternatives — typed `Stage` protocols, dispatch-over-list — are defeated by the intricate inter-stage data flow (UTF-8/ASCII prechecks computed early but consumed late, `PipelineContext` cache shared across CJK gating and structural probing).
+
+Move code out of the orchestrator only when there is a genuine new home for it (the 7.5.0 extractions to `pipeline/language.py`, `pipeline/postprocess.py`, and the `pipeline/markup.py` consolidation are the model), not to shrink `_run_pipeline_core` for its own sake. The 7.4.2 `RuntimeError` bug in the structural-confidence branch was sometimes cited as evidence for typed phases, but the fix was a missing `if results:` guard inside one branch — no dispatcher restructuring would have caught it.
