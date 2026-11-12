@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from chardet._utils import DEFAULT_MAX_BYTES, MINIMUM_THRESHOLD
 from chardet.enums import EncodingEra
@@ -22,6 +23,9 @@ from chardet.output_names import apply_compat_names, apply_preferred_superset
 from chardet.pipeline import DetectionDict, DetectionResult
 from chardet.pipeline.orchestrator import run_pipeline
 from chardet.registry import _validate_encoding, normalize_encodings
+
+if TYPE_CHECKING:
+    from chardet.evidence import DetectionEvidence
 
 #: Default chunk_size value (deprecated, kept for backward-compat signatures).
 _DEFAULT_CHUNK_SIZE: int = 65_536
@@ -158,6 +162,54 @@ class DetectionRequest:
             full_ranking=full_ranking,
             input_truncated=input_truncated,
         )
+
+    def run_with_evidence(
+        self,
+        data: bytes,
+        *,
+        full_ranking: bool = False,
+        input_truncated: bool = False,
+    ) -> tuple[list[DetectionResult], DetectionEvidence]:
+        """Run the pipeline once and return its results plus evidence record.
+
+        The bytes are examined by the same single pass as :meth:`run`; the
+        :class:`~chardet.evidence.DetectionEvidence` is built as a by-product
+        and augmented with this request's output-name trace.
+
+        :returns: The ranked results and the frozen evidence record.
+        """
+        from chardet.evidence import (  # noqa: PLC0415
+            build_render_events,
+        )
+        from chardet.pipeline.orchestrator import (  # noqa: PLC0415
+            run_pipeline_with_evidence,
+        )
+
+        results, recorder = run_pipeline_with_evidence(
+            data,
+            self.encoding_era,
+            self.max_bytes,
+            include_encodings=self.include_encodings,
+            exclude_encodings=self.exclude_encodings,
+            no_match_encoding=self.no_match_encoding,
+            empty_input_encoding=self.empty_input_encoding,
+            full_ranking=full_ranking,
+            input_truncated=input_truncated,
+        )
+        window = data[: self.max_bytes]
+        top_name = results[0].encoding
+        recorder.record_render(
+            build_render_events(
+                internal_name=top_name,
+                window=window,
+                prefer_superset=self.prefer_superset,
+                compat_names=self.compat_names,
+                include_encodings=self.include_encodings,
+                exclude_encodings=self.exclude_encodings,
+                encoding_era=self.encoding_era,
+            )
+        )
+        return results, recorder.build()
 
     def render(
         self,

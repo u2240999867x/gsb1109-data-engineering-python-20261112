@@ -9,19 +9,34 @@ from chardet._utils import DEFAULT_MAX_BYTES, MINIMUM_THRESHOLD
 from chardet._version import __version__
 from chardet.detector import UniversalDetector
 from chardet.enums import EncodingEra, LanguageFilter
+from chardet.evidence import (
+    CandidateVerdict,
+    CorrectionEvent,
+    DetectionEvidence,
+    DetectionReport,
+    RenderEvent,
+    ReplayVerdict,
+)
 from chardet.pipeline import DetectionDict, DetectionResult
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
     "MINIMUM_THRESHOLD",
+    "CandidateVerdict",
+    "CorrectionEvent",
     "DetectionDict",
+    "DetectionEvidence",
+    "DetectionReport",
     "DetectionResult",
     "EncodingEra",
     "LanguageFilter",
+    "RenderEvent",
+    "ReplayVerdict",
     "UniversalDetector",
     "__version__",
     "detect",
     "detect_all",
+    "detect_with_evidence",
 ]
 
 
@@ -117,6 +132,52 @@ def detect(  # noqa: PLR0913
     )
     data = byte_str if isinstance(byte_str, bytes) else bytes(byte_str)
     return request.render(request.run(data), data[:max_bytes])[0]
+
+
+def detect_with_evidence(  # noqa: PLR0913
+    byte_str: bytes | bytearray,
+    should_rename_legacy: bool = False,
+    encoding_era: EncodingEra = EncodingEra.ALL,
+    chunk_size: int = _DEFAULT_CHUNK_SIZE,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    *,
+    prefer_superset: bool = False,
+    compat_names: bool = True,
+    include_encodings: Iterable[str] | None = None,
+    exclude_encodings: Iterable[str] | None = None,
+    no_match_encoding: str = "cp1252",
+    empty_input_encoding: str = "utf-8",
+) -> DetectionReport:
+    """Detect once and return the result with its archived judgment evidence.
+
+    The bytes are examined in a single detection pass, exactly as
+    :func:`detect` does; the only extra work is recording why the answer
+    won and where every other candidate was excluded.  The returned
+    :class:`DetectionReport` pairs the normal result dict with a
+    :class:`DetectionEvidence` whose
+    :meth:`~DetectionEvidence.can_reuse_decision` answers policy-change
+    questions (a narrower whitelist, a different output-name policy)
+    without re-reading *byte_str*.
+
+    All parameters are identical to :func:`detect`.
+    """
+    request = DetectionRequest.resolve(
+        should_rename_legacy=should_rename_legacy,
+        encoding_era=encoding_era,
+        chunk_size=chunk_size,
+        max_bytes=max_bytes,
+        prefer_superset=prefer_superset,
+        compat_names=compat_names,
+        include_encodings=include_encodings,
+        exclude_encodings=exclude_encodings,
+        no_match_encoding=no_match_encoding,
+        empty_input_encoding=empty_input_encoding,
+        stacklevel=3,
+    )
+    data = byte_str if isinstance(byte_str, bytes) else bytes(byte_str)
+    results, evidence = request.run_with_evidence(data)
+    result = request.render(results, data[:max_bytes])[0]
+    return DetectionReport(result=result, evidence=evidence)
 
 
 def detect_all(  # noqa: PLR0913

@@ -9,6 +9,21 @@ import warnings
 
 from chardet._utils import DEFAULT_MAX_BYTES, EVIDENCE_CAP_BYTES, decodes_without_error
 from chardet.enums import EncodingEra
+from chardet.evidence import (
+    GATE_CJK,
+    GATE_VALIDITY,
+    STAGE_ASCII,
+    STAGE_BINARY,
+    STAGE_BOM,
+    STAGE_ESCAPE,
+    STAGE_MAGIC,
+    STAGE_MARKUP,
+    STAGE_UTF8,
+    STAGE_UTF1632,
+    EvidenceRecorder,
+    apply_postprocess_with_evidence,
+    registry_snapshot,
+)
 from chardet.pipeline import (
     _NONE_RESULT,
     DETERMINISTIC_CONFIDENCE,
@@ -77,12 +92,13 @@ def _make_fallback_or_none(
     return [DetectionResult(encoding=encoding, confidence=0.10, language=None)]
 
 
-def _hold_validity_past_cap(
+def _hold_validity_past_cap(  # noqa: PLR0913
     data: bytes,
     evidence: bytes,
     results: list[DetectionResult],
     allowed: frozenset[str],
     no_match_encoding: str,
+    recorder: EvidenceRecorder | None = None,
 ) -> list[DetectionResult]:
     """Keep the validity contract for the part of the window past the evidence cap.
 
@@ -110,10 +126,21 @@ def _hold_validity_past_cap(
         return results
     for i, r in enumerate(results):
         if r.encoding is not None and decodes_without_error(data, r.encoding):
+            if recorder is not None and i > 0:
+                recorder.record_hold_dropped(
+                    tuple(
+                        earlier.encoding
+                        for earlier in results[:i]
+                        if earlier.encoding is not None
+                    )
+                )
             return results if i == 0 else results[i:]
-    return _make_fallback_or_none(
+    fallback = _make_fallback_or_none(
         no_match_encoding, allowed, "no_match_encoding", stacklevel=7
     )
+    if recorder is not None:
+        recorder.record_fallback(fallback[0].encoding, empty=False)
+    return fallback
 
 
 # Minimum structural score (valid multi-byte sequences / lead bytes) required
@@ -200,6 +227,23 @@ def _gate_cjk_candidates(
     return tuple(gated)
 
 
+def _cjk_gate_reason(name: str, ctx: PipelineContext) -> str:
+    """Re-derive the recorded reason the CJK gate dropped *name*.
+
+    The decision order mirrors :func:`_gate_cjk_candidates` exactly; the
+    structural caches it populated make the first three checks lookups.
+    """
+    score = ctx.mb_scores.get(name)
+    if score is None or score < _CJK_MIN_MB_RATIO:
+        return "structural_pair_ratio_too_low"
+    if ctx.non_ascii_count is not None and ctx.non_ascii_count < _CJK_MIN_NON_ASCII:
+        return "too_few_non_ascii_bytes"
+    coverage = ctx.mb_coverage.get(name)
+    if coverage is None or coverage < _CJK_MIN_BYTE_COVERAGE:
+        return "multibyte_byte_coverage_too_low"
+    return "lead_byte_diversity_too_low"
+
+
 def _score_structural_candidates(
     data: bytes,
     structural_scores: list[tuple[str, float]],
@@ -275,6 +319,7 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
     empty_input_encoding: str = "utf-8",
     full_ranking: bool = False,
     input_truncated: bool = False,
+    recorder: EvidenceRecorder | None = None,
 ) -> list[DetectionResult]:
     """Core pipeline logic. Returns list of results sorted by confidence."""
     ctx = PipelineContext()
@@ -288,14 +333,19 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
     allowed: frozenset[str] = frozenset(enc.name for enc in candidates)
 
     if not data:
-        return _make_fallback_or_none(
+        fallback = _make_fallback_or_none(
             empty_input_encoding, allowed, "empty_input_encoding"
         )
+        if recorder is not None:
+            recorder.record_fallback(fallback[0].encoding, empty=True)
+        return fallback
 
     # Stage 1a: BOM detection (runs first — BOMs are definitive and
     # UTF-16/32 data looks binary due to null bytes)
     bom_result = detect_bom(data, input_truncated=input_truncated)
     if bom_result is not None and bom_result.encoding in allowed:
+        if recorder is not None:
+            recorder.record_early_exit(bom_result.encoding, STAGE_BOM)
         return [bom_result]
 
     # Stage 1a+: UTF-16/32 null-byte pattern detection (for files without
@@ -311,6 +361,8 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
         and utf1632_result.encoding in allowed
         and decodes_without_error(data, utf1632_result.encoding)
     ):
+        if recorder is not None:
+            recorder.record_early_exit(utf1632_result.encoding, STAGE_UTF1632)
         return [utf1632_result]
 
     # Escape-sequence encodings (ISO-2022, HZ-GB-2312, UTF-7): must run
@@ -330,13 +382,19 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
         if escape_result.encoding == "utf-7":
             declared = detect_markup_charset(data, allowed)
             if declared is not None and utf7_shifts_markup(data):
+                if recorder is not None:
+                    recorder.record_early_exit(declared.encoding, STAGE_MARKUP)
                 return [declared]
+        if recorder is not None:
+            recorder.record_early_exit(escape_result.encoding, STAGE_ESCAPE)
         return [escape_result]
 
     # Magic number detection for known binary formats — runs before
     # UTF-8/ASCII prechecks to avoid unnecessary analysis on binary data.
     magic_result = detect_magic(data)
     if magic_result is not None:
+        if recorder is not None:
+            recorder.record_early_exit(magic_result.encoding, STAGE_MAGIC)
         return [magic_result]
 
     # Pre-check UTF-8 to prevent false binary classification.  Valid UTF-8
@@ -360,6 +418,8 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
         and ascii_precheck is None
         and is_binary(data, max_bytes=max_bytes)
     ):
+        if recorder is not None:
+            recorder.record_early_exit(None, STAGE_BINARY)
         return [_BINARY_RESULT]
 
     # Stage 1b: Markup charset extraction.  The stage owns the whole
@@ -367,14 +427,20 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
     # gate, and the UTF-8 override (see its docstring).
     markup_result = detect_markup_charset(data, allowed, utf8_precheck)
     if markup_result is not None:
+        if recorder is not None:
+            recorder.record_early_exit(markup_result.encoding, STAGE_MARKUP)
         return [markup_result]
 
     # Stage 1c: ASCII (use pre-computed result)
     if ascii_precheck is not None and ascii_precheck.encoding in allowed:
+        if recorder is not None:
+            recorder.record_early_exit(ascii_precheck.encoding, STAGE_ASCII)
         return [ascii_precheck]
 
     # Stage 1d: UTF-8 structural validation (use pre-computed result)
     if utf8_precheck is not None and utf8_precheck.encoding in allowed:
+        if recorder is not None:
+            recorder.record_early_exit(utf8_precheck.encoding, STAGE_UTF8)
         return [utf8_precheck]
 
     # The filtering, gating, and probing stages below converge on bounded
@@ -389,6 +455,8 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
 
     # Stage 2a: Byte validity filtering
     valid_candidates = filter_by_validity(evidence, candidates)
+    if recorder is not None:
+        recorder.record_validity(tuple(enc.name for enc in valid_candidates))
 
     # The exhaustive UTF-8 check saw the whole window; when it *rejected*
     # the data but the window extends past the evidence cap, the slice
@@ -401,16 +469,35 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
     # is the window, so validity already agrees and this never fires.)
     if not utf8_valid and len(data) > len(evidence):
         valid_candidates = tuple(e for e in valid_candidates if e.name != "utf-8")
+        if recorder is not None:
+            recorder.record_exclusion(
+                "utf-8", GATE_VALIDITY, "exhaustive_utf8_check_rejected_window"
+            )
 
     if not valid_candidates:
-        return _make_fallback_or_none(no_match_encoding, allowed, "no_match_encoding")
+        fallback = _make_fallback_or_none(
+            no_match_encoding, allowed, "no_match_encoding"
+        )
+        if recorder is not None:
+            recorder.record_fallback(fallback[0].encoding, empty=False)
+        return fallback
 
     # Gate: eliminate CJK multi-byte candidates that lack genuine
     # multi-byte structure.  Cache structural scores for Stage 2b.
+    pre_gate_names = frozenset(enc.name for enc in valid_candidates)
     valid_candidates = _gate_cjk_candidates(evidence, valid_candidates, ctx)
+    if recorder is not None:
+        post_gate_names = frozenset(enc.name for enc in valid_candidates)
+        for name in sorted(pre_gate_names - post_gate_names):
+            recorder.record_exclusion(name, GATE_CJK, _cjk_gate_reason(name, ctx))
 
     if not valid_candidates:
-        return _make_fallback_or_none(no_match_encoding, allowed, "no_match_encoding")
+        fallback = _make_fallback_or_none(
+            no_match_encoding, allowed, "no_match_encoding"
+        )
+        if recorder is not None:
+            recorder.record_fallback(fallback[0].encoding, empty=False)
+        return fallback
 
     # Stage 2b: Structural probing for multi-byte encodings
     # Reuse scores already computed during the CJK gate above.
@@ -437,11 +524,28 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
                 full_ranking=full_ranking,
             )
             if results:
-                results = postprocess_results(
-                    evidence, results, input_truncated=evidence_truncated
-                )
+                if recorder is not None:
+                    recorder.record_scoring(
+                        tuple(enc.name for enc in valid_candidates),
+                        tuple(
+                            (r.encoding, r.confidence)
+                            for r in results
+                            if r.encoding is not None
+                        ),
+                        full_ranking=full_ranking,
+                    )
+                    results = apply_postprocess_with_evidence(
+                        recorder,
+                        evidence,
+                        results,
+                        input_truncated=evidence_truncated,
+                    )
+                else:
+                    results = postprocess_results(
+                        evidence, results, input_truncated=evidence_truncated
+                    )
                 return _hold_validity_past_cap(
-                    data, evidence, results, allowed, no_match_encoding
+                    data, evidence, results, allowed, no_match_encoding, recorder
                 )
 
     # Stage 3: Statistical scoring for all remaining candidates.
@@ -452,12 +556,35 @@ def _run_pipeline_core(  # noqa: PLR0913, PLR0915
         score_candidates(stat_data, tuple(valid_candidates), full_ranking=full_ranking)
     )
     if not results:
-        return _make_fallback_or_none(no_match_encoding, allowed, "no_match_encoding")
+        fallback = _make_fallback_or_none(
+            no_match_encoding, allowed, "no_match_encoding"
+        )
+        if recorder is not None:
+            recorder.record_fallback(fallback[0].encoding, empty=False)
+        return fallback
+
+    if recorder is not None:
+        recorder.record_scoring(
+            tuple(enc.name for enc in valid_candidates),
+            tuple(
+                (r.encoding, r.confidence) for r in results if r.encoding is not None
+            ),
+            full_ranking=full_ranking,
+        )
 
     # Rank corrections reason about the same evidence window the ranking
     # came from, which also bounds their byte-presence scans.
-    results = postprocess_results(evidence, results, input_truncated=evidence_truncated)
-    return _hold_validity_past_cap(data, evidence, results, allowed, no_match_encoding)
+    if recorder is not None:
+        results = apply_postprocess_with_evidence(
+            recorder, evidence, results, input_truncated=evidence_truncated
+        )
+    else:
+        results = postprocess_results(
+            evidence, results, input_truncated=evidence_truncated
+        )
+    return _hold_validity_past_cap(
+        data, evidence, results, allowed, no_match_encoding, recorder
+    )
 
 
 def run_pipeline(  # noqa: PLR0913
@@ -471,6 +598,7 @@ def run_pipeline(  # noqa: PLR0913
     empty_input_encoding: str = "utf-8",
     full_ranking: bool = False,
     input_truncated: bool = False,
+    recorder: EvidenceRecorder | None = None,
 ) -> list[DetectionResult]:
     """Run the full detection pipeline.
 
@@ -490,6 +618,7 @@ def run_pipeline(  # noqa: PLR0913
         ``max_bytes``, which this function cannot see from ``len(data)``
         alone).  Truncation by the ``max_bytes`` slice here is detected
         either way; the flag only ever widens it.
+    :param recorder: Optional evidence recorder filled in during this run.
     :returns: A list of :class:`DetectionResult` sorted by confidence descending.
     """
     results = _run_pipeline_core(
@@ -502,6 +631,7 @@ def run_pipeline(  # noqa: PLR0913
         no_match_encoding=no_match_encoding,
         empty_input_encoding=empty_input_encoding,
         full_ranking=full_ranking,
+        recorder=recorder,
     )
     # Same slice the core ran on: ``max_bytes`` is the caller's cap on what
     # chardet may look at, and language fill is not exempt from it just
@@ -523,9 +653,60 @@ def run_pipeline(  # noqa: PLR0913
     # Clamp confidence to [0.0, 1.0] at the public API boundary.  Internal
     # stages may boost confidence above 1.0 for ranking purposes (e.g.
     # CJK byte-coverage boost), but callers expect a probability-like value.
-    return [
+    results = [
         DetectionResult(r.encoding, min(r.confidence, 1.0), r.language, r.mime_type)
         if r.confidence > 1.0
         else r
         for r in results
     ]
+    if recorder is not None:
+        recorder.record_final_ranking(
+            tuple((r.encoding, r.confidence) for r in results)
+        )
+    return results
+
+
+def run_pipeline_with_evidence(  # noqa: PLR0913
+    data: bytes,
+    encoding_era: EncodingEra,
+    max_bytes: int,
+    *,
+    include_encodings: frozenset[str] | None,
+    exclude_encodings: frozenset[str] | None,
+    no_match_encoding: str,
+    empty_input_encoding: str,
+    full_ranking: bool,
+    input_truncated: bool,
+) -> tuple[list[DetectionResult], "EvidenceRecorder"]:
+    """Run the pipeline once, building its :class:`EvidenceRecorder`.
+
+    The recorder is created from the same candidate set the pipeline uses,
+    so the run still detects only once; the record is a by-product of that
+    pass, not a second analysis of the bytes.
+    """
+    candidates = get_candidates(encoding_era, include_encodings, exclude_encodings)
+    window = data[:max_bytes]
+    recorder = EvidenceRecorder(
+        encoding_era,
+        include_encodings,
+        exclude_encodings,
+        registry_snapshot(),
+        tuple(enc.name for enc in candidates),
+        examined_bytes=len(window),
+        evidence_bytes=min(len(window), EVIDENCE_CAP_BYTES),
+        no_match_encoding=no_match_encoding,
+        empty_input_encoding=empty_input_encoding,
+    )
+    results = run_pipeline(
+        data,
+        encoding_era,
+        max_bytes,
+        include_encodings=include_encodings,
+        exclude_encodings=exclude_encodings,
+        no_match_encoding=no_match_encoding,
+        empty_input_encoding=empty_input_encoding,
+        full_ranking=full_ranking,
+        input_truncated=input_truncated,
+        recorder=recorder,
+    )
+    return results, recorder

@@ -13,6 +13,19 @@ Unreleased
 
 **Features:**
 
+- New :func:`chardet.detect_with_evidence` and
+  :meth:`chardet.UniversalDetector.close_with_evidence` run the same
+  single detection pass as :func:`chardet.detect` and additionally return
+  a :class:`~chardet.DetectionEvidence` record: the stage that committed
+  the answer, every candidate's gate verdict or score, the rank-correction
+  and output-name traces, and the window and evidence sizes.  The record
+  holds no input bytes.  Its
+  :meth:`~chardet.DetectionEvidence.can_reuse_decision` answers whether a
+  changed candidate whitelist or output-name policy can still reuse the
+  archived decoding decision without re-reading the file, naming the exact
+  stage whose evidence must be re-gathered when it cannot.  Plain
+  :func:`chardet.detect` output is unchanged and takes the same code path.
+
 - ``chardetect`` has two new flags.  ``--prefer-superset`` reports a
   detected subset encoding under its Windows code page, like
   ``Windows-1253`` for ISO-8859-7 text, the same as

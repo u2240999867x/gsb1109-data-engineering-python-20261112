@@ -8,6 +8,8 @@ Top-level Functions
 
 .. autofunction:: chardet.detect_all
 
+.. autofunction:: chardet.detect_with_evidence
+
 UniversalDetector
 -----------------
 
@@ -34,6 +36,33 @@ Result Types
    :undoc-members:
 
 .. autoclass:: chardet.DetectionDict
+   :members:
+   :undoc-members:
+
+Detection Evidence
+------------------
+
+.. autoclass:: chardet.DetectionReport
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.DetectionEvidence
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.ReplayVerdict
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.CandidateVerdict
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.RenderEvent
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.CorrectionEvent
    :members:
    :undoc-members:
 

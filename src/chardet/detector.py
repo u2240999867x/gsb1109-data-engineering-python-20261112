@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterable
 from types import MappingProxyType
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from chardet import _utils
 from chardet._request import DetectionRequest
@@ -13,6 +13,9 @@ from chardet._utils import DEFAULT_MAX_BYTES
 from chardet.enums import EncodingEra, LanguageFilter
 from chardet.output_names import PREFERRED_SUPERSET
 from chardet.pipeline import _NONE_RESULT, DetectionDict
+
+if TYPE_CHECKING:
+    from chardet.evidence import DetectionReport
 
 
 class UniversalDetector:
@@ -152,6 +155,31 @@ class UniversalDetector:
             self._result = self._request.render(results, data)[0]
             self._done = True
         return self.result
+
+    def close_with_evidence(self) -> DetectionReport:
+        """Finalize detection and return the result with its evidence record.
+
+        Equivalent to :meth:`close` for the buffered data, but the single
+        detection pass also builds a
+        :class:`~chardet.evidence.DetectionEvidence` answering later
+        policy-change questions without re-reading the stream.
+
+        :raises ValueError: If called after :meth:`close` without
+            :meth:`reset` — the evidence belongs to one recorded run.
+        """
+        from chardet.evidence import DetectionReport  # noqa: PLC0415
+
+        if self._closed:
+            msg = "close_with_evidence() called after close() without reset()"
+            raise ValueError(msg)
+        self._closed = True
+        data = bytes(self._buffer)
+        results, evidence = self._request.run_with_evidence(
+            data, input_truncated=self._input_truncated
+        )
+        self._result = self._request.render(results, data)[0]
+        self._done = True
+        return DetectionReport(result=self.result, evidence=evidence)
 
     def reset(self) -> None:
         """Reset the detector to its initial state for reuse."""

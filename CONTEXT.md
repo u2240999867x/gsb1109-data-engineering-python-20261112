@@ -135,6 +135,12 @@ The filter applied between byte-validity and structural probing that drops CJK c
 **Detection request** (`_request.DetectionRequest`):
 One call's resolved options and the work they drive. `detect`, `detect_all`, and `UniversalDetector` are adapters over it (`chardetect` goes through `detect`): `resolve` validates the public keyword arguments and owns their deprecation warnings, `run` calls the **Orchestrator**, and `render` turns the ranked results into the dicts callers see.
 
+**Detection evidence** (`evidence.DetectionEvidence`):
+The archived judgment credentials of one detection run — the committing stage, one `CandidateVerdict` per registry entry (gate reason or full statistical score), the final ranking, fired rank corrections, the output-name trace, and the window/evidence sizes. It holds no input bytes. Built as a by-product of the single detection pass by `EvidenceRecorder` via `detect_with_evidence` / `UniversalDetector.close_with_evidence`; the default path builds no recorder.
+
+**Policy-change replay** (`DetectionEvidence.can_reuse_decision`):
+A set-arithmetic judgment over recorded boundaries answering whether a new candidate whitelist or output-name policy can reuse the same decoding decision without re-reading the bytes. Returns a `ReplayVerdict`; when not reusable, `rerun_stage` names the exact stage (candidate whitelist, byte validity, statistical scoring, postprocess, or output render) whose byte evidence must be re-gathered. Whitelist additions of un-examined codecs and codec-changing output remaps lacking a recorded window decode are the unanswerable cases; removing recorded gate exclusions, scored losers, and alias-only renames are directly answerable.
+
 **Rendering** (`DetectionRequest.render`):
 Turning ranked `DetectionResult`s into public dicts: the **preferred-superset remapping** when asked for, then the **display name**, each checked against the **examination window** so the reported name decodes it. Also where `detect_all`'s threshold filter, sort, and one-name-once rule live.
 
