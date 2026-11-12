@@ -593,6 +593,73 @@ def sep_inserter(iterator: Iterator[Any], sep: StrOrBytes) -> Iterator[Any]:
         return
 
 
+def _strip_thousands_regex(alg: NSType) -> Pattern[str]:
+    """
+    Create a regular expression that will remove thousands separators.
+
+    Parameters
+    ----------
+    alg : ns enum
+        Indicate how to format the *str*.
+
+    Returns
+    -------
+    regex : compiled regex object
+        Regular expression object that matches thousands separators.
+
+    """
+    strip_thousands = r"""
+        (?<=[0-9]{{1}})  # At least 1 number
+        (?<![0-9]{{4}})  # No more than 3 numbers
+        {nodecimal}      # Cannot follow decimal
+        {thou}           # The thousands separator
+        (?=[0-9]{{3}}    # Three numbers must follow
+         ([^0-9]|$)      # But a non-number after that
+        )
+    """
+    nodecimal = r""
+    if alg & ns.FLOAT:
+        # Make a regular expression component that will ensure no
+        # separators are removed after a decimal point.
+        d = re.escape(get_decimal_point())
+        nodecimal += r"(?<!" + d + r"[0-9])"
+        nodecimal += r"(?<!" + d + r"[0-9]{2})"
+        nodecimal += r"(?<!" + d + r"[0-9]{3})"
+    # Input is already normalized when this expression is applied.
+    thousands_sep = _normalize_input_factory(alg)(get_thousands_sep())
+    return re.compile(
+        strip_thousands.format(
+            thou=re.escape(thousands_sep),
+            nodecimal=nodecimal,
+        ),
+        flags=re.VERBOSE,
+    )
+
+
+def _switch_decimal_regex(alg: NSType) -> Pattern[str] | None:
+    """
+    Create a regular expression to change the decimal point to a period.
+
+    Parameters
+    ----------
+    alg : ns enum
+        Indicate how to format the *str*.
+
+    Returns
+    -------
+    regex : compiled regex object or None
+        Regular expression object that matches the locale decimal point,
+        or *None* if no decimal point switching is needed.
+
+    """
+    decimal = get_decimal_point()
+    if alg & ns.FLOAT and decimal != ".":
+        switch_decimal = r"(?<=[0-9]){decimal}|{decimal}(?=[0-9])"
+        switch_decimal = switch_decimal.format(decimal=re.escape(decimal))
+        return re.compile(switch_decimal)
+    return None
+
+
 def input_string_transform_factory(alg: NSType) -> StrToStr:
     """
     Create a function to transform a string.
@@ -626,40 +693,13 @@ def input_string_transform_factory(alg: NSType) -> StrToStr:
         function_chain.append(methodcaller("casefold"))
 
     if alg & ns.LOCALENUM:
-        # Create a regular expression that will remove thousands separators.
-        strip_thousands = r"""
-            (?<=[0-9]{{1}})  # At least 1 number
-            (?<![0-9]{{4}})  # No more than 3 numbers
-            {nodecimal}      # Cannot follow decimal
-            {thou}           # The thousands separator
-            (?=[0-9]{{3}}    # Three numbers must follow
-             ([^0-9]|$)      # But a non-number after that
-            )
-        """
-        nodecimal = r""
-        if alg & ns.FLOAT:
-            # Make a regular expression component that will ensure no
-            # separators are removed after a decimal point.
-            d = re.escape(get_decimal_point())
-            nodecimal += r"(?<!" + d + r"[0-9])"
-            nodecimal += r"(?<!" + d + r"[0-9]{2})"
-            nodecimal += r"(?<!" + d + r"[0-9]{3})"
-        # Input is already normalized when this expression is applied.
-        thousands_sep = _normalize_input_factory(alg)(get_thousands_sep())
-        strip_thousands = strip_thousands.format(
-            thou=re.escape(thousands_sep),
-            nodecimal=nodecimal,
-        )
-        strip_thousands_re = re.compile(strip_thousands, flags=re.VERBOSE)
+        # Remove thousands separators.
+        strip_thousands_re = _strip_thousands_regex(alg)
         function_chain.append(partial(strip_thousands_re.sub, ""))
 
-        # Create a regular expression that will change the decimal point to
-        # a period if not already a period.
-        decimal = get_decimal_point()
-        if alg & ns.FLOAT and decimal != ".":
-            switch_decimal = r"(?<=[0-9]){decimal}|{decimal}(?=[0-9])"
-            switch_decimal = switch_decimal.format(decimal=re.escape(decimal))
-            switch_decimal_re = re.compile(switch_decimal)
+        # Change the decimal point to a period if not already a period.
+        switch_decimal_re = _switch_decimal_regex(alg)
+        if switch_decimal_re is not None:
             function_chain.append(partial(switch_decimal_re.sub, "."))
 
     # Return the chained functions.

@@ -9,6 +9,14 @@ try:
 except ImportError:
     __version__ = "unknown version"
     __version_tuple__ = (0, 0, "unknown version")
+from natsort._explain import (
+    MISSING,
+    ComparisonExplanation,
+    ExplainedComponent,
+    SkippedEqualNumber,
+    Span,
+    explain,
+)
 from natsort.natsort import (
     NatsortKeyType,
     OSSortKeyType,
@@ -33,16 +41,22 @@ from natsort.ns_enum import NSType, ns
 from natsort.utils import KeyType, NatsortInType, NatsortOutType, chain_functions
 
 __all__ = [
+    "MISSING",
+    "ComparisonExplanation",
+    "ExplainedComponent",
     "KeyType",
     "NSType",
     "NatsortInType",
     "NatsortKeyType",
     "NatsortOutType",
     "OSSortKeyType",
+    "SkippedEqualNumber",
+    "Span",
     "as_ascii",
     "as_utf8",
     "chain_functions",
     "decoder",
+    "explain",
     "humansorted",
     "index_humansorted",
     "index_natsorted",

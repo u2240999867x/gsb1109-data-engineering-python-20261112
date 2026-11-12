@@ -3,6 +3,11 @@ Unreleased
 
 ### Added
 
+- Add `explain`, a reviewable companion to the public comparison entry
+  points that reports the sorting policy, the hierarchical sort keys, the
+  spans of the original strings behind each key component, the first
+  component that decided the order, and any numerically equal components
+  that were skipped along the way
 - Add `--zero-terminated` option to CLI
   ([@baldassarreFe](https://github.com/baldassarreFe), issues
   [#179](https://github.com/SethMMorton/natsort/issues/179) and

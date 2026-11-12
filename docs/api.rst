@@ -43,6 +43,20 @@ The :class:`~natsort.ns` enum
 
 .. autofunction:: os_sort_keygen
 
+:func:`~natsort.explain`
+++++++++++++++++++++++++
+
+.. autofunction:: explain
+
+.. autoclass:: ComparisonExplanation
+    :members:
+
+.. autoclass:: ExplainedComponent
+
+.. autoclass:: SkippedEqualNumber
+
+.. autoclass:: Span
+
 Convenience Functions
 ---------------------
 
