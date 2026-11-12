@@ -37,6 +37,31 @@ Result Types
    :members:
    :undoc-members:
 
+Legacy Directory Migration
+--------------------------
+
+.. autofunction:: chardet.migrate_directory
+
+.. autoclass:: chardet.LegacyPolicy
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.LegacyRecord
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.MigrationVerdict
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.RecordMigration
+   :members:
+   :undoc-members:
+
+.. autoclass:: chardet.DirectoryMigration
+   :members:
+   :undoc-members:
+
 Constants
 ---------
 
@@ -52,3 +77,10 @@ Constants
 
    Default minimum confidence threshold for filtering results in
    :func:`chardet.detect_all`.
+
+.. py:data:: chardet.MIGRATION_POLICY_VERSION
+   :type: int
+   :value: 1
+
+   Policy version written by :func:`chardet.migrate_directory`; directories
+   whose policy carries it are re-checked, not re-migrated.

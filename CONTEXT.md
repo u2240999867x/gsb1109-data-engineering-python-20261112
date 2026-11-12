@@ -150,6 +150,11 @@ The string returned to library callers after `apply_compat_names` runs (e.g. `Wi
 **Preferred-superset remapping** (`prefer_superset=True`):
 The output transform in `output_names.apply_preferred_superset` that remaps a detected subset codec to its Windows superset before returning. Off by default; opt-in. The pairs it applies are `output_names.PREFERRED_SUPERSET`, a frozen *selection* of the **encoding superset relationship**, not the relation itself: the table is public through `UniversalDetector.LEGACY_MAP`, so adding a pair changes the option's output (ADR-0007).
 
+### Legacy directory migration
+
+**Migration** (`migration.py`):
+The re-check of a data directory holding old-version detection results and the old policy that produced them (`migrate_directory`). Each **LegacyRecord** is re-derived on the current pipeline and classified **REUSE** (the stored answer is reproduced on the stored bytes), **RESAMPLE** (it is not; re-derive from fresh data), or **INSUFFICIENT** (no bytes kept, nothing to certify). The **LegacyPolicy**'s inert fields (`lang_filter`, `chunk_size`, `should_rename_legacy`) decide whether the old candidate set is reproducible; when it is not, affected records are flagged. A record that kept only a prefix of its data certifies a shorter range than one that kept the full sample. Directories stamped with `MIGRATION_POLICY_VERSION` are re-checked, not re-migrated: repeating the migration yields the same verdicts, identities, certified ranges, and decodability conclusions.
+
 ### Accuracy evaluation
 
 **Equivalence rule**:

@@ -9,19 +9,35 @@ from chardet._utils import DEFAULT_MAX_BYTES, MINIMUM_THRESHOLD
 from chardet._version import __version__
 from chardet.detector import UniversalDetector
 from chardet.enums import EncodingEra, LanguageFilter
+from chardet.migration import (
+    MIGRATION_POLICY_VERSION,
+    DirectoryMigration,
+    LegacyPolicy,
+    LegacyRecord,
+    MigrationVerdict,
+    RecordMigration,
+    migrate_directory,
+)
 from chardet.pipeline import DetectionDict, DetectionResult
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
+    "MIGRATION_POLICY_VERSION",
     "MINIMUM_THRESHOLD",
     "DetectionDict",
     "DetectionResult",
+    "DirectoryMigration",
     "EncodingEra",
     "LanguageFilter",
+    "LegacyPolicy",
+    "LegacyRecord",
+    "MigrationVerdict",
+    "RecordMigration",
     "UniversalDetector",
     "__version__",
     "detect",
     "detect_all",
+    "migrate_directory",
 ]
 
 
