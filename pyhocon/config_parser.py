@@ -9,7 +9,7 @@ import sys
 
 import pyparsing
 from pyparsing import (Forward, Group, Keyword, Literal, Optional,
-                       ParserElement, ParseSyntaxException, QuotedString,
+                       ParseSyntaxException, QuotedString,
                        Regex, SkipTo, StringEnd, Suppress, TokenConverter,
                        Word, ZeroOrMore, alphanums, alphas8bit, col, lineno,
                        replace_with)
@@ -72,6 +72,33 @@ class NO_SUBSTITUTION(object):
 
 class STR_SUBSTITUTION(object):
     pass
+
+
+def _restrict_whitespace_chars(expr, whitespace_chars):
+    """Restrict the whitespace chars of every element of a pyparsing grammar.
+
+    Only the elements reachable from ``expr`` are modified. Unlike
+    ``ParserElement.set_default_whitespace_chars`` (or temporarily overriding
+    ``ParserElement.DEFAULT_WHITE_CHARS``), the process-wide pyparsing
+    default is left untouched, so grammars built concurrently by other
+    threads are never affected and there is no global state to restore if
+    parsing raises.
+    """
+    seen = set()
+
+    def apply(element):
+        if id(element) in seen:
+            return
+        seen.add(id(element))
+        # Assign whiteChars directly instead of calling set_whitespace_chars,
+        # which would also force skipWhitespace on elements that deliberately
+        # leave whitespace alone.
+        element.whiteChars = set(whitespace_chars)
+        element.copyDefaultWhiteChars = False
+        for child in element.recurse():
+            apply(child)
+
+    apply(expr)
 
 
 U_KEY_SEP = '.'
@@ -337,98 +364,95 @@ class ConfigParser(object):
 
             return ConfigInclude(obj if isinstance(obj, list) else obj.items())
 
-        @contextlib.contextmanager
-        def set_default_white_spaces():
-            default = ParserElement.DEFAULT_WHITE_CHARS
-            ParserElement.set_default_whitespace_chars(' \t')
-            yield
-            ParserElement.set_default_whitespace_chars(default)
+        assign_expr = Forward()
+        true_expr = Keyword("true", caseless=True).set_parse_action(replace_with(True))
+        false_expr = Keyword("false", caseless=True).set_parse_action(replace_with(False))
+        null_expr = Keyword("null", caseless=True).set_parse_action(replace_with(NoneValue()))
+        key = QuotedString('"""', esc_char='\\', unquote_results=False) | \
+            QuotedString('"', esc_char='\\', unquote_results=False) | Word(alphanums + alphas8bit + '._- /')
 
-        with set_default_white_spaces():
-            assign_expr = Forward()
-            true_expr = Keyword("true", caseless=True).set_parse_action(replace_with(True))
-            false_expr = Keyword("false", caseless=True).set_parse_action(replace_with(False))
-            null_expr = Keyword("null", caseless=True).set_parse_action(replace_with(NoneValue()))
-            key = QuotedString('"""', esc_char='\\', unquote_results=False) | \
-                QuotedString('"', esc_char='\\', unquote_results=False) | Word(alphanums + alphas8bit + '._- /')
+        eol = Word('\n\r').suppress()
+        eol_comma = Word('\n\r,').suppress()
+        comment = (Literal('#') | Literal('//')) - SkipTo(eol | StringEnd())
+        comment_eol = Suppress(Optional(eol_comma) + comment)
+        comment_no_comma_eol = (comment | eol).suppress()
+        number_expr = Regex(r'[+-]?(\d*\.\d+|\d+(\.\d+)?)([eE][+\-]?\d+)?(?=$|[ \t]*([\$\}\],#\n\r]|//))',
+                            re.DOTALL).set_parse_action(convert_number)
+        # multi line string using """
+        # Using fix described in http://pyparsing.wikispaces.com/share/view/3778969
+        multiline_string = Regex('""".*?"*"""', re.DOTALL | re.UNICODE).set_parse_action(parse_multi_string)
+        # single quoted line string
+        quoted_string = Regex(r'"(?:[^"\\\n]|\\.)*"[ \t]*', re.UNICODE).set_parse_action(create_quoted_string)
+        # unquoted string that takes the rest of the line until an optional comment
+        # we support .properties multiline support which is like this:
+        # line1  \
+        # line2 \
+        # so a backslash precedes the \n
+        unquoted_string = Regex(r'(?:[^^`+?!@*&"\[\{\s\]\}#,=\$\\]|\\.)+[ \t]*', re.UNICODE).set_parse_action(
+            unescape_string)
+        substitution_expr = Regex(r'[ \t]*\$\{[^\}]+\}[ \t]*').set_parse_action(create_substitution)
+        string_expr = multiline_string | quoted_string | unquoted_string
 
-            eol = Word('\n\r').suppress()
-            eol_comma = Word('\n\r,').suppress()
-            comment = (Literal('#') | Literal('//')) - SkipTo(eol | StringEnd())
-            comment_eol = Suppress(Optional(eol_comma) + comment)
-            comment_no_comma_eol = (comment | eol).suppress()
-            number_expr = Regex(r'[+-]?(\d*\.\d+|\d+(\.\d+)?)([eE][+\-]?\d+)?(?=$|[ \t]*([\$\}\],#\n\r]|//))',
-                                re.DOTALL).set_parse_action(convert_number)
-            # multi line string using """
-            # Using fix described in http://pyparsing.wikispaces.com/share/view/3778969
-            multiline_string = Regex('""".*?"*"""', re.DOTALL | re.UNICODE).set_parse_action(parse_multi_string)
-            # single quoted line string
-            quoted_string = Regex(r'"(?:[^"\\\n]|\\.)*"[ \t]*', re.UNICODE).set_parse_action(create_quoted_string)
-            # unquoted string that takes the rest of the line until an optional comment
-            # we support .properties multiline support which is like this:
-            # line1  \
-            # line2 \
-            # so a backslash precedes the \n
-            unquoted_string = Regex(r'(?:[^^`+?!@*&"\[\{\s\]\}#,=\$\\]|\\.)+[ \t]*', re.UNICODE).set_parse_action(
-                unescape_string)
-            substitution_expr = Regex(r'[ \t]*\$\{[^\}]+\}[ \t]*').set_parse_action(create_substitution)
-            string_expr = multiline_string | quoted_string | unquoted_string
+        value_expr = get_period_expr() | number_expr | true_expr | false_expr | null_expr | string_expr
 
-            value_expr = get_period_expr() | number_expr | true_expr | false_expr | null_expr | string_expr
-
-            include_content = (
-                quoted_string | ((Keyword('url') | Keyword('file') | Keyword('package'))
-                                 - Literal('(').suppress() - quoted_string
-                                 - Literal(')').suppress())
-            )
-            include_expr = (
-                Keyword("include", caseless=True).suppress() + (
-                    include_content | (
-                        Keyword("required") - Literal('(').suppress() - include_content - Literal(')').suppress()
-                    )
+        include_content = (
+            quoted_string | ((Keyword('url') | Keyword('file') | Keyword('package'))
+                             - Literal('(').suppress() - quoted_string
+                             - Literal(')').suppress())
+        )
+        include_expr = (
+            Keyword("include", caseless=True).suppress() + (
+                include_content | (
+                    Keyword("required") - Literal('(').suppress() - include_content - Literal(')').suppress()
                 )
-            ).set_parse_action(include_config)
-
-            root_dict_expr = Forward()
-            dict_expr = Forward()
-            list_expr = Forward()
-            multi_value_expr = ZeroOrMore(
-                comment_eol | include_expr | substitution_expr | dict_expr | list_expr | value_expr | (Literal(
-                    '\\') - eol).suppress())
-            # for a dictionary : or = is optional
-            # last zeroOrMore is because we can have t = {a:4} {b: 6} {c: 7} which is dictionary concatenation
-            inside_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma))
-            inside_root_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma),
-                                                     root=True)
-            dict_expr << Suppress('{') - inside_dict_expr - Suppress('}')
-            root_dict_expr << Suppress('{') - inside_root_dict_expr - Suppress('}')
-            list_entry = ConcatenatedValueParser(multi_value_expr)
-            list_expr << Suppress('[') - ListParser(list_entry - ZeroOrMore(eol_comma - list_entry)) - Suppress(']')
-
-            # special case when we have a value assignment where the string can potentially be the remainder of the line
-            assign_expr << Group(
-                key - ZeroOrMore(comment_no_comma_eol) - (
-                    dict_expr | (Literal('=') | Literal(':') | Literal('+=')) - ZeroOrMore(
-                        comment_no_comma_eol) - ConcatenatedValueParser(multi_value_expr))
             )
+        ).set_parse_action(include_config)
 
-            # the file can be { ... } where {} can be omitted or []
-            config_expr = ZeroOrMore(comment_eol | eol) + (
-                list_expr | root_dict_expr | inside_root_dict_expr
-            ) + ZeroOrMore(
-                comment_eol | eol_comma)
-            config = config_expr.parse_string(content, parse_all=True)[0]
+        root_dict_expr = Forward()
+        dict_expr = Forward()
+        list_expr = Forward()
+        multi_value_expr = ZeroOrMore(
+            comment_eol | include_expr | substitution_expr | dict_expr | list_expr | value_expr | (Literal(
+                '\\') - eol).suppress())
+        # for a dictionary : or = is optional
+        # last zeroOrMore is because we can have t = {a:4} {b: 6} {c: 7} which is dictionary concatenation
+        inside_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma))
+        inside_root_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma),
+                                                 root=True)
+        dict_expr << Suppress('{') - inside_dict_expr - Suppress('}')
+        root_dict_expr << Suppress('{') - inside_root_dict_expr - Suppress('}')
+        list_entry = ConcatenatedValueParser(multi_value_expr)
+        list_expr << Suppress('[') - ListParser(list_entry - ZeroOrMore(eol_comma - list_entry)) - Suppress(']')
 
-            if resolve:
-                allow_unresolved = resolve and unresolved_value is not DEFAULT_SUBSTITUTION
-                allow_unresolved = allow_unresolved and unresolved_value is not MANDATORY_SUBSTITUTION
-                has_unresolved = cls.resolve_substitutions(config, allow_unresolved)
-                if has_unresolved and unresolved_value is MANDATORY_SUBSTITUTION:
-                    raise ConfigSubstitutionException(
-                        'resolve cannot be set to True and unresolved_value to MANDATORY_SUBSTITUTION')
+        # special case when we have a value assignment where the string can potentially be the remainder of the line
+        assign_expr << Group(
+            key - ZeroOrMore(comment_no_comma_eol) - (
+                dict_expr | (Literal('=') | Literal(':') | Literal('+=')) - ZeroOrMore(
+                    comment_no_comma_eol) - ConcatenatedValueParser(multi_value_expr))
+        )
 
-            if unresolved_value is not NO_SUBSTITUTION and unresolved_value is not DEFAULT_SUBSTITUTION:
-                cls.unresolve_substitutions_to_value(config, unresolved_value)
+        # the file can be { ... } where {} can be omitted or []
+        config_expr = ZeroOrMore(comment_eol | eol) + (
+            list_expr | root_dict_expr | inside_root_dict_expr
+        ) + ZeroOrMore(
+            comment_eol | eol_comma)
+        # HOCON treats newlines as significant, so this grammar must only
+        # skip spaces and tabs. Restrict the whitespace chars on the grammar
+        # itself instead of mutating pyparsing's process-wide default, which
+        # would leak into grammars built concurrently by other threads.
+        _restrict_whitespace_chars(config_expr, ' \t')
+        config = config_expr.parse_string(content, parse_all=True)[0]
+
+        if resolve:
+            allow_unresolved = resolve and unresolved_value is not DEFAULT_SUBSTITUTION
+            allow_unresolved = allow_unresolved and unresolved_value is not MANDATORY_SUBSTITUTION
+            has_unresolved = cls.resolve_substitutions(config, allow_unresolved)
+            if has_unresolved and unresolved_value is MANDATORY_SUBSTITUTION:
+                raise ConfigSubstitutionException(
+                    'resolve cannot be set to True and unresolved_value to MANDATORY_SUBSTITUTION')
+
+        if unresolved_value is not NO_SUBSTITUTION and unresolved_value is not DEFAULT_SUBSTITUTION:
+            cls.unresolve_substitutions_to_value(config, unresolved_value)
         return config
 
     @classmethod

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from collections import OrderedDict
 from datetime import timedelta
 
@@ -16,8 +17,10 @@ except ImportError:
 
 import mock
 import pytest
-from pyparsing import ParseBaseException, ParseException, ParseSyntaxException
+from pyparsing import (OneOrMore, ParseBaseException, ParseException,
+                       ParserElement, ParseSyntaxException, Word, alphanums)
 
+import pyhocon.config_parser as config_parser
 from pyhocon import (ConfigFactory, ConfigParser, ConfigSubstitutionException,
                      ConfigTree, HOCONConverter)
 from pyhocon.exceptions import (ConfigException, ConfigMissingException,
@@ -2720,3 +2723,106 @@ try:
         assert config['a'] == data_set[1]
 except ImportError:
     pass
+
+
+class TestGrammarWhitespaceIsolation(object):
+    """pyhocon restricts its grammar whitespace chars to spaces and tabs so
+    that newlines stay significant. This must not leak into the process-wide
+    pyparsing default: other data streams build their own grammars
+    concurrently and do not use any pyhocon lock.
+    """
+
+    HOCON_CONTENT = """
+        # column mapping
+        columns = [
+          "col_a"  # first column
+          "col_b"
+          "col_c"
+        ]
+        description = \"\"\"multi
+        line
+        value\"\"\"
+        retries = 3
+    """
+
+    @staticmethod
+    def _build_record_grammar():
+        # newline-delimited record grammar of the other data stream
+        return OneOrMore(Word(alphanums))
+
+    @staticmethod
+    def _parse_records():
+        grammar = TestGrammarWhitespaceIsolation._build_record_grammar()
+        return list(grammar.parse_string('rec1\nrec2\n', parse_all=True))
+
+    def _assert_hocon_content(self, config):
+        assert config.get('columns') == ['col_a', 'col_b', 'col_c']
+        assert config.get('description') == 'multi\n        line\n        value'
+        assert config.get('retries') == 3
+
+    def test_grammar_built_during_hocon_grammar_creation(self):
+        holder = {}
+        real_get_period_expr = config_parser.get_period_expr
+
+        def interleaved_get_period_expr():
+            # controlled interleaving: the other data stream builds its own
+            # grammar half-way through the HOCON grammar creation
+            holder['grammar'] = self._build_record_grammar()
+            return real_get_period_expr()
+
+        with mock.patch.object(config_parser, 'get_period_expr', interleaved_get_period_expr):
+            config = ConfigFactory.parse_string(self.HOCON_CONTENT)
+
+        self._assert_hocon_content(config)
+        assert list(holder['grammar'].parse_string('rec1\nrec2\n', parse_all=True)) == ['rec1', 'rec2']
+        assert ParserElement.DEFAULT_WHITE_CHARS == ' \n\t\r'
+
+    def test_parallel_hocon_loads_and_record_stream(self):
+        expected_columns = None
+        errors = []
+
+        def load_column_mapping():
+            for _ in range(15):
+                config = ConfigFactory.parse_string(self.HOCON_CONTENT)
+                if config.get('columns') != ['col_a', 'col_b', 'col_c']:
+                    errors.append('unexpected columns: %r' % (config.get('columns'),))
+
+        def extract_records():
+            for _ in range(15):
+                if self._parse_records() != ['rec1', 'rec2']:
+                    errors.append('record stream corrupted')
+
+        threads = ([threading.Thread(target=load_column_mapping) for _ in range(3)] +
+                   [threading.Thread(target=extract_records) for _ in range(3)])
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert ParserElement.DEFAULT_WHITE_CHARS == ' \n\t\r'
+
+    def test_state_after_syntax_error_and_nested_include(self, tmpdir):
+        with pytest.raises(ParseBaseException):
+            ConfigFactory.parse_string('columns = { col_a: ')
+
+        # a leaked whitespace override would corrupt every grammar built
+        # from now on, including pyhocon's own
+        assert ParserElement.DEFAULT_WHITE_CHARS == ' \n\t\r'
+        assert self._parse_records() == ['rec1', 'rec2']
+
+        rows_file = tmpdir.join('rows.conf')
+        rows_file.write('row1 = 1\nrow2 = 2\nrow3 = 3\n')
+        main_file = tmpdir.join('main.conf')
+        main_file.write(
+            '# partition config\ninclude "rows.conf"\ncolumns = ["col_a",\n"col_b"]\n')
+
+        standalone = ConfigFactory.parse_file(str(rows_file))
+        config = ConfigFactory.parse_file(str(main_file))
+        assert len(config) == len(standalone) + 1
+        assert [key for key in config if key.startswith('row')] == ['row1', 'row2', 'row3']
+        assert config.get('columns') == ['col_a', 'col_b']
+
+        # the next import behaves exactly as a standalone run
+        again = ConfigFactory.parse_file(str(main_file))
+        assert list(again) == list(config)
