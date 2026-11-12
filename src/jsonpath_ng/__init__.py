@@ -2,6 +2,14 @@ import warnings
 
 from ._deprecations import _DEPRECATED_CLASS_NAMES
 from ._deprecations import _deprecated_class_message
+from .cardinality import ANY
+from .cardinality import ArrayConstraint
+from .cardinality import Cardinality
+from .cardinality import CardinalityError
+from .cardinality import ObjectConstraint
+from .cardinality import ValueConstraint
+from .cardinality import matches_constraint
+from .cardinality import maximum_cardinality
 from .jsonpath import *  # noqa
 from .parser import parse  # noqa
 
