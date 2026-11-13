@@ -1,3 +1,4 @@
+import bisect
 import os
 import string
 import io
@@ -52,6 +53,8 @@ class KeywordProcessor(object):
         self.keyword_trie_dict = dict()
         self.case_sensitive = case_sensitive
         self._terms_in_trie = 0
+        self._keyword_weights = dict()
+        self._default_weight = 1.0
 
     def __len__(self):
         """Number of terms present in the keyword_trie_dict
@@ -195,6 +198,7 @@ class KeywordProcessor(object):
                 # successfully removed keyword
                 status = True
                 self._terms_in_trie -= 1
+                self._keyword_weights.pop(keyword, None)
         return status
 
     def __iter__(self):
@@ -222,7 +226,7 @@ class KeywordProcessor(object):
         """
         self.non_word_boundaries.add(character)
 
-    def add_keyword(self, keyword, clean_name=None):
+    def add_keyword(self, keyword, clean_name=None, weight=None):
         """To add one or more keywords to the dictionary
         pass the keyword and the clean name it maps to.
 
@@ -234,6 +238,11 @@ class KeywordProcessor(object):
                 clean term for that keyword that you would want to get back in return or replace
                 if not provided, keyword will be used as the clean name also.
 
+            weight : float
+                optional non-negative priority weight for this keyword, used only by
+                `extract_keywords_with_priority`. If not provided the keyword keeps its
+                current weight, or the default weight (1.0) for new keywords.
+
         Returns:
             status : bool
                 The return value. True for success, False otherwise.
@@ -244,8 +253,78 @@ class KeywordProcessor(object):
             >>> # OR
             >>> keyword_processor.add_keyword('Big Apple')
             >>> # This case 'Big Apple' will return 'Big Apple'
+            >>> # OR, with a priority weight
+            >>> keyword_processor.add_keyword('Big Apple', 'New York', weight=2.5)
+
+        Raises:
+            ValueError: If `weight` is not a non-negative number.
         """
-        return self.__setitem__(keyword, clean_name)
+        if weight is not None:
+            self._validate_weight(weight)
+        status = self.__setitem__(keyword, clean_name)
+        if weight is not None and keyword and (clean_name or keyword):
+            if not self.case_sensitive:
+                keyword = keyword.lower()
+            self._keyword_weights[keyword] = float(weight)
+        return status
+
+    @staticmethod
+    def _validate_weight(weight):
+        """Validate that a priority weight is a non-negative number.
+
+        Args:
+            weight : float
+                weight to validate
+
+        Raises:
+            ValueError: If `weight` is not a non-negative number.
+        """
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise ValueError("weight must be a non-negative number, got {!r}".format(weight))
+        if weight < 0:
+            raise ValueError("weight must be a non-negative number, got {!r}".format(weight))
+
+    def set_keyword_weight(self, keyword, weight):
+        """Set the priority weight of a keyword already present in the dictionary.
+        The weight is only used by `extract_keywords_with_priority`.
+
+        Args:
+            keyword : string
+                keyword whose weight should be updated
+
+            weight : float
+                non-negative priority weight
+
+        Returns:
+            status : bool
+                True if the keyword is present and the weight was set, False otherwise.
+
+        Raises:
+            ValueError: If `weight` is not a non-negative number.
+        """
+        self._validate_weight(weight)
+        if keyword not in self:
+            return False
+        if not self.case_sensitive:
+            keyword = keyword.lower()
+        self._keyword_weights[keyword] = float(weight)
+        return True
+
+    def get_keyword_weight(self, keyword):
+        """Get the priority weight of a keyword.
+
+        Args:
+            keyword : string
+                keyword whose weight should be returned
+
+        Returns:
+            weight : float
+                The weight assigned to the keyword, or the default weight (1.0)
+                if no explicit weight was set.
+        """
+        if not self.case_sensitive:
+            keyword = keyword.lower()
+        return self._keyword_weights.get(keyword, self._default_weight)
 
     def remove_keyword(self, keyword):
         """To remove one or more keywords from the dictionary
@@ -580,6 +659,149 @@ class KeywordProcessor(object):
         if span_info:
             return keywords_extracted
         return [value[0] for value in keywords_extracted]
+
+    def _iter_keyword_candidates(self, sentence):
+        """Yield every exact keyword match in the sentence as a candidate.
+
+        A match must start at a word beginning (start of sentence, right after a
+        non-word character, or on a non-word character itself) and must end right
+        before a non-word character or at the end of the sentence, so word
+        boundaries are respected exactly like in `extract_keywords`.
+
+        Args:
+            sentence (str): Line of text where we will search for keywords
+
+        Yields:
+            (clean_name, start, end) (tuple): clean name mapped to the matched
+                keyword, and the [start, end) character span of the match.
+        """
+        if not self.case_sensitive:
+            sentence = sentence.lower()
+        sentence_len = len(sentence)
+        for start in range(sentence_len):
+            if (start > 0
+                    and sentence[start - 1] in self.non_word_boundaries
+                    and sentence[start] in self.non_word_boundaries):
+                # a match cannot start in the middle of a word
+                continue
+            current_dict = self.keyword_trie_dict
+            idx = start
+            while idx < sentence_len:
+                char = sentence[idx]
+                if char not in current_dict:
+                    break
+                current_dict = current_dict[char]
+                idx += 1
+                if self._keyword in current_dict and (
+                        idx == sentence_len or sentence[idx] not in self.non_word_boundaries):
+                    yield current_dict[self._keyword], start, idx
+
+    @staticmethod
+    def _priority_state_key(state):
+        """Comparison key for priority selection states. Smaller is better.
+
+        Declared stable tie-breaking rules, applied in order:
+            1. higher total weight wins;
+            2. higher total character coverage wins;
+            3. lexicographically smaller tuple of start offsets wins
+               (earlier, and then fewer/longer, hits);
+            4. lexicographically smaller tuple of clean names wins.
+        """
+        total_weight, coverage, starts, clean_names, _ = state
+        return (-total_weight, -coverage, starts, clean_names)
+
+    def extract_keywords_with_priority(self, sentence, span_info=False, return_conflicts=False):
+        """Searches in the string for keywords, resolving overlaps by priority weights.
+
+        Unlike `extract_keywords` (which keeps its original longest-match behaviour),
+        this method collects *all* exact matches as candidates, assigns each candidate
+        the weight of its keyword (see `add_keyword(..., weight=...)`, default 1.0),
+        and then selects a set of non-overlapping candidates that maximizes the total
+        weight over the whole sentence (weighted interval scheduling).
+
+        Ties are resolved by the following declared stable rules, in order:
+            1. higher total weight wins;
+            2. higher total character coverage wins;
+            3. lexicographically smaller tuple of start offsets wins
+               (earlier, and then fewer/longer, hits);
+            4. lexicographically smaller tuple of clean names wins.
+
+        Args:
+            sentence (str): Line of text where we will search for keywords
+            span_info (bool): True if you need the span boundaries of the selected hits
+            return_conflicts (bool): True to also get the competing candidates that
+                overlapped a selected hit but were not selected, for manual review.
+                Conflicts are always returned with span info as
+                (clean_name, start, end) tuples.
+
+        Returns:
+            keywords_extracted (list): List of clean names found in the sentence, or
+                list of (clean_name, start, end) tuples if `span_info` is True.
+                If `return_conflicts` is True, returns a tuple
+                (keywords_extracted, conflicts) instead.
+
+        Examples:
+            >>> from flashtext import KeywordProcessor
+            >>> keyword_processor = KeywordProcessor()
+            >>> keyword_processor.add_keyword('new york', 'New York City', weight=5.0)
+            >>> keyword_processor.add_keyword('york', weight=1.0)
+            >>> keyword_processor.extract_keywords_with_priority('I love new york.')
+            >>> ['New York City']
+            >>> keyword_processor.extract_keywords_with_priority(
+            ...     'I love new york.', span_info=True, return_conflicts=True)
+            >>> ([('New York City', 7, 15)], [('york', 11, 15)])
+        """
+        empty_result = ([], []) if return_conflicts else []
+        if not sentence:
+            return empty_result
+        compare_sentence = sentence if self.case_sensitive else sentence.lower()
+        candidates = []
+        for clean_name, start, end in self._iter_keyword_candidates(sentence):
+            keyword = compare_sentence[start:end]
+            weight = self._keyword_weights.get(keyword, self._default_weight)
+            candidates.append((clean_name, start, end, weight))
+        if not candidates:
+            return empty_result
+        # weighted interval scheduling over candidates sorted by end offset
+        candidates.sort(key=lambda candidate: (candidate[2], candidate[1], candidate[0]))
+        ends = [candidate[2] for candidate in candidates]
+        # dp state: (total_weight, coverage, starts, clean_names, selected_indices)
+        dp = [(0.0, 0, (), (), ())]
+        for idx, (clean_name, start, end, weight) in enumerate(candidates):
+            prev = bisect.bisect_right(ends, start, 0, idx)
+            base_weight, base_coverage, base_starts, base_names, base_selection = dp[prev]
+            take = (
+                base_weight + weight,
+                base_coverage + (end - start),
+                base_starts + (start,),
+                base_names + (clean_name,),
+                base_selection + (idx,),
+            )
+            skip = dp[-1]
+            if self._priority_state_key(take) < self._priority_state_key(skip):
+                dp.append(take)
+            else:
+                dp.append(skip)
+        selected_indices = set(dp[-1][4])
+        selected = sorted(
+            (candidates[idx] for idx in selected_indices),
+            key=lambda candidate: (candidate[1], candidate[2], candidate[0]),
+        )
+        if span_info:
+            selected_output = [(clean_name, start, end) for clean_name, start, end, _ in selected]
+        else:
+            selected_output = [clean_name for clean_name, _, _, _ in selected]
+        if not return_conflicts:
+            return selected_output
+        selected_spans = [(start, end) for _, start, end, _ in selected]
+        conflicts = [
+            (clean_name, start, end)
+            for idx, (clean_name, start, end, _) in enumerate(candidates)
+            if idx not in selected_indices
+            and any(start < sel_end and sel_start < end for sel_start, sel_end in selected_spans)
+        ]
+        conflicts.sort(key=lambda conflict: (conflict[1], conflict[2], conflict[0]))
+        return selected_output, conflicts
 
     def replace_keywords(self, sentence, max_cost=0):
         """Searches in the string for all keywords present in corpus.
