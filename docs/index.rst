@@ -33,6 +33,7 @@ runtime dependencies, works on PyPy.
    :hidden:
 
    usage
+   encoding-identity
    supported-encodings
    supported-mime-types
    how-it-works
