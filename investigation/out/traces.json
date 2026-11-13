@@ -1,0 +1,562 @@
+{
+  "A1_sequential": [
+    {
+      "table": "orders",
+      "attempt": 0,
+      "pk": "ORD-1001",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 1,
+      "pk": "ORD-1002",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 2,
+      "pk": "ORD-1003",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 3,
+      "pk": "ORD-1004",
+      "draws": 7,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 4,
+      "pk": "ORD-1005",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 5,
+      "pk": "ORD-1006",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 0,
+      "pk": "CUST-2001",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 1,
+      "pk": "CUST-2002",
+      "draws": 8,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 2,
+      "pk": "CUST-2003",
+      "draws": 7,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 3,
+      "pk": "CUST-2004",
+      "draws": 6,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 4,
+      "pk": "CUST-2005",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 5,
+      "pk": "CUST-2006",
+      "draws": 6,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    }
+  ],
+  "A2_interleaved": [
+    {
+      "table": "orders",
+      "attempt": 0,
+      "pk": "ORD-1001",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 0,
+      "pk": "CUST-2001",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 1,
+      "pk": "ORD-1002",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 1,
+      "pk": "CUST-2002",
+      "draws": 7,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 2,
+      "pk": "ORD-1003",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 2,
+      "pk": "CUST-2003",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 3,
+      "pk": "ORD-1004",
+      "draws": 5,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 3,
+      "pk": "CUST-2004",
+      "draws": 8,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 4,
+      "pk": "ORD-1005",
+      "draws": 7,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 4,
+      "pk": "CUST-2005",
+      "draws": 6,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 5,
+      "pk": "ORD-1006",
+      "draws": 4,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 5,
+      "pk": "CUST-2006",
+      "draws": 6,
+      "sources": [
+        "F-shared/numeric",
+        "F-shared/person"
+      ],
+      "outcome": "emitted"
+    }
+  ],
+  "B1_clean": [
+    {
+      "table": "orders",
+      "attempt": 0,
+      "pk": "ORD-1001",
+      "draws": 5,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 1,
+      "pk": "ORD-1002",
+      "draws": 4,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 2,
+      "pk": "ORD-1003",
+      "draws": 5,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 3,
+      "pk": "ORD-1004",
+      "draws": 7,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 4,
+      "pk": "ORD-1005",
+      "draws": 4,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 5,
+      "pk": "ORD-1006",
+      "draws": 4,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 0,
+      "pk": "CUST-2001",
+      "draws": 4,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 1,
+      "pk": "CUST-2002",
+      "draws": 6,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 2,
+      "pk": "CUST-2003",
+      "draws": 7,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 3,
+      "pk": "CUST-2004",
+      "draws": 5,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 4,
+      "pk": "CUST-2005",
+      "draws": 5,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 5,
+      "pk": "CUST-2006",
+      "draws": 11,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    }
+  ],
+  "B2_flaky": [
+    {
+      "table": "orders",
+      "attempt": 0,
+      "pk": "ORD-1001",
+      "draws": 5,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 1,
+      "pk": "ORD-1002",
+      "draws": 4,
+      "sources": [
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 2,
+      "pk": null,
+      "draws": 1,
+      "sources": [
+        "F-orders/numeric"
+      ],
+      "outcome": "skipped"
+    },
+    {
+      "table": "orders",
+      "attempt": 3,
+      "pk": "ORD-1003",
+      "draws": 8,
+      "sources": [
+        "F-orders/generic",
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 4,
+      "pk": "ORD-1004",
+      "draws": 9,
+      "sources": [
+        "F-orders/generic",
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 5,
+      "pk": null,
+      "draws": 2,
+      "sources": [
+        "F-orders/numeric"
+      ],
+      "outcome": "skipped"
+    },
+    {
+      "table": "orders",
+      "attempt": 6,
+      "pk": "ORD-1005",
+      "draws": 9,
+      "sources": [
+        "F-orders/generic",
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "orders",
+      "attempt": 7,
+      "pk": "ORD-1006",
+      "draws": 6,
+      "sources": [
+        "F-orders/generic",
+        "F-orders/numeric",
+        "F-orders/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 0,
+      "pk": "CUST-2001",
+      "draws": 4,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 1,
+      "pk": "CUST-2002",
+      "draws": 6,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 2,
+      "pk": "CUST-2003",
+      "draws": 7,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 3,
+      "pk": "CUST-2004",
+      "draws": 5,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 4,
+      "pk": "CUST-2005",
+      "draws": 5,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    },
+    {
+      "table": "customers",
+      "attempt": 5,
+      "pk": "CUST-2006",
+      "draws": 11,
+      "sources": [
+        "F-customers/numeric",
+        "F-customers/person"
+      ],
+      "outcome": "emitted"
+    }
+  ]
+}
