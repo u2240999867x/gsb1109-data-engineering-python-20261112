@@ -11,6 +11,7 @@ from mimesis.builder.resolver import (
     NestedSchema,
     Resolvable,
     SchemaRefProxy,
+    snapshot_definition,
 )
 from mimesis.builder.schema import SchemaDefinition, SchemaRef
 from mimesis.locales import Locale
@@ -53,6 +54,7 @@ class SchemaBuilder:
     """
 
     __slots__ = (
+        "_active_definitions",
         "_dependencies",
         "_field",
         "_generated",
@@ -81,6 +83,9 @@ class SchemaBuilder:
         self._dependencies: dict[str, set[str]] = {}
         self._generated: dict[str, list[JSON]] = {}
         self._generating: set[str] = set()
+        # Definitions pinned for the running create() batch. None outside a
+        # batch; the dependency graph is derived from this same snapshot.
+        self._active_definitions: dict[str, SchemaDefinition] | None = None
 
     def reseed(self, seed: Seed = MissingSeed) -> None:
         """Reseed all random generators.
@@ -189,27 +194,82 @@ class SchemaBuilder:
         if name in self._schemas:
             raise ValueError(f"Schema '{name}' is already defined")
         self._schemas[name] = schema
-        self._dependencies[name] = self._extract_dependencies(schema)
-        return SchemaRef(name, schema)
+        self._dependencies = self._build_dependencies(self._schemas)
+        return SchemaRef(name)
 
-    def _extract_dependencies(self, obj: Any) -> set[str]:
-        """Extract schema dependencies from a definition.
+    def replace_schema(self, name: str, schema: SchemaDefinition) -> SchemaRef:
+        """Replace an existing schema definition.
 
-        :param obj: Object to scan for dependencies.
-        :return: Set of schema names this definition depends on.
+        Unlike mutating the original definition in place, this is the explicit
+        way to change a table after registration. The replacement is validated
+        immediately: if it introduces a dependency cycle, the builder is left
+        untouched and the error is raised before any batch is affected.
+
+        A running :meth:`create` batch keeps generating from its own pinned
+        snapshot of the old definitions; the replacement takes effect on the
+        next batch.
+
+        :param name: Name of the schema to replace.
+        :param schema: New dictionary defining the schema fields.
+        :return: A SchemaRef for the replaced name. Previously returned refs
+            and foreign keys stay valid because they reference the name.
+        :raises ValueError: If the schema is not defined or the replacement
+            introduces a circular dependency.
         """
+        if name not in self._schemas:
+            raise ValueError(f"Schema '{name}' is not defined")
+
+        candidate_definitions = {**self._schemas, name: schema}
+        candidate_dependencies = self._build_dependencies(candidate_definitions)
+        self._ensure_acyclic(candidate_dependencies)
+
+        self._schemas[name] = schema
+        self._dependencies = candidate_dependencies
+        return SchemaRef(name)
+
+    def _build_dependencies(
+        self,
+        definitions: dict[str, SchemaDefinition],
+    ) -> dict[str, set[str]]:
+        """Build the full dependency graph for a set of definitions.
+
+        :param definitions: Mapping of schema name to its definition.
+        :return: Mapping of schema name to the names it depends on.
+        """
+        return {
+            name: self._collect_dependencies(definition, definitions, set())
+            for name, definition in definitions.items()
+        }
+
+    def _collect_dependencies(
+        self,
+        obj: Any,
+        definitions: dict[str, SchemaDefinition],
+        nested_seen: set[str],
+    ) -> set[str]:
         deps: set[str] = set()
 
         if isinstance(obj, (FieldRef, SchemaRefProxy)):
             deps.add(obj._schema_name)
         elif isinstance(obj, NestedSchema):
-            deps.update(self._extract_dependencies(obj._definition))
+            nested_name = obj._schema_name
+            # Guard against self/cyclic nesting while scanning the graph.
+            if nested_name in nested_seen:
+                return deps
+            nested_seen = nested_seen | {nested_name}
+            nested_definition = definitions.get(nested_name)
+            if nested_definition is not None:
+                deps.update(
+                    self._collect_dependencies(
+                        nested_definition, definitions, nested_seen
+                    )
+                )
         elif isinstance(obj, dict):
             for value in obj.values():
-                deps.update(self._extract_dependencies(value))
+                deps.update(self._collect_dependencies(value, definitions, nested_seen))
         elif isinstance(obj, (list, tuple)):
             for item in obj:
-                deps.update(self._extract_dependencies(item))
+                deps.update(self._collect_dependencies(item, definitions, nested_seen))
 
         return deps
 
@@ -289,10 +349,39 @@ class SchemaBuilder:
 
         return self._random.choice(items)
 
-    def _topological_sort(self, names: list[str]) -> list[str]:
+    def _ensure_acyclic(self, dependencies: dict[str, set[str]]) -> None:
+        """Validate that a dependency graph has no cycles.
+
+        :param dependencies: Mapping of schema name to its dependency names.
+        :raises ValueError: If a circular dependency is detected.
+        """
+        visited: set[str] = set()
+        visiting: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visited:
+                return
+            if name in visiting:
+                raise ValueError(f"Circular dependency detected involving '{name}'")
+
+            visiting.add(name)
+            for dep in dependencies.get(name, set()):
+                visit(dep)
+            visiting.remove(name)
+            visited.add(name)
+
+        for name in dependencies:
+            visit(name)
+
+    def _topological_sort(
+        self,
+        names: list[str],
+        dependencies: dict[str, set[str]],
+    ) -> list[str]:
         """Sort schema names by their dependencies.
 
         :param names: List of schema names to sort.
+        :param dependencies: The dependency graph to sort against.
         :return: Topologically sorted list.
         :raises ValueError: If circular dependency detected.
         """
@@ -308,7 +397,7 @@ class SchemaBuilder:
 
             visiting.add(name)
 
-            for dep in self._dependencies.get(name, set()):
+            for dep in dependencies.get(name, set()):
                 visit(dep)
 
             visiting.remove(name)
@@ -320,6 +409,17 @@ class SchemaBuilder:
 
         return result
 
+    def _get_batch_definition(self, name: str) -> SchemaDefinition:
+        """Return the definition pinned for the running batch.
+
+        :param name: Schema name.
+        :return: The snapshotted definition used by the active batch.
+        :raises ValueError: If no generation batch is running.
+        """
+        if self._active_definitions is None:
+            raise ValueError(f"Schema '{name}' can only be resolved during create()")
+        return self._active_definitions[name]
+
     def _generate_schema(self, name: str, count: int) -> list[JSON]:
         """Generate data for a single schema.
 
@@ -327,7 +427,7 @@ class SchemaBuilder:
         :param count: Number of items to generate.
         :return: List of generated items.
         """
-        definition = self._schemas[name]
+        definition = self._get_batch_definition(name)
         results: list[JSON] = []
 
         self._generating.add(name)
@@ -345,6 +445,11 @@ class SchemaBuilder:
 
         Schemas are automatically sorted by dependencies, so you can
         pass them in any order.
+
+        The whole set of definitions and the dependency graph are snapshotted
+        when the batch starts: the batch reads one consistent, immutable view
+        even if the original definitions are mutated or replaced while it is
+        running. Changes become visible to the next batch.
 
         :param counts: Schema names are mapped to their counts.
         :return: Dictionary of schema names to generated data lists.
@@ -368,20 +473,36 @@ class SchemaBuilder:
             if count < 0:
                 raise ValueError(f"Count for '{name}' must be >= 0")
 
-        for name in counts:
-            for dep in sorted(self._dependencies[name] - counts.keys()):
-                raise ValueError(
-                    f"Schema '{dep}' is required by '{name}' but not yet generated. "
-                    f"Pass {dep}=<count> to create() as well."
-                )
+        # Pin one immutable view of the definitions for the whole batch, and
+        # derive the dependency graph from that very same view so the two can
+        # never drift apart even if the originals are mutated mid-run. Changes
+        # become visible to the next batch.
+        active_definitions = {
+            name: snapshot_definition(definition)
+            for name, definition in self._schemas.items()
+        }
+        active_dependencies = self._build_dependencies(active_definitions)
+        self._active_definitions = active_definitions
 
-        ordered_names = self._topological_sort(list(counts.keys()))
+        try:
+            for name in counts:
+                for dep in sorted(active_dependencies[name] - counts.keys()):
+                    raise ValueError(
+                        f"Schema '{dep}' is required by '{name}' but not yet "
+                        f"generated. Pass {dep}=<count> to create() as well."
+                    )
 
-        result: dict[str, list[JSON]] = {}
-        for name in ordered_names:
-            data = self._generate_schema(name, counts[name])
-            self._generated[name] = data
-            result[name] = data
+            ordered_names = self._topological_sort(
+                list(counts.keys()), active_dependencies
+            )
+
+            result: dict[str, list[JSON]] = {}
+            for name in ordered_names:
+                data = self._generate_schema(name, counts[name])
+                self._generated[name] = data
+                result[name] = data
+        finally:
+            self._active_definitions = None
 
         return result
 
@@ -396,6 +517,7 @@ class SchemaBuilder:
         self._dependencies.clear()
         self._generated.clear()
         self._generating.clear()
+        self._active_definitions = None
 
     def __repr__(self) -> str:
         schemas = ", ".join(self._schemas.keys()) or "none"

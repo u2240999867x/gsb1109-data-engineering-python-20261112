@@ -1,3 +1,18 @@
+Unreleased
+----------
+
+**SchemaBuilder**:
+
+* Each ``create()`` batch now snapshots the registered definitions and derives
+  its dependency graph from that same snapshot, so in-place mutations of the
+  original definitions can no longer make the graph stale relative to the
+  definitions used for generation. Changes apply to the next batch.
+* Added ``SchemaBuilder.replace_schema()`` for explicitly replacing one table.
+  A replacement that would introduce a dependency cycle is rejected and leaves
+  the builder unchanged.
+* Snapshotting preserves lazy-object identity, so a lazy value shared by
+  several columns keeps the same provider/key callback instance and its state.
+
 Version 21.0.0
 --------------
 

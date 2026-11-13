@@ -38,16 +38,14 @@ class SchemaRef:
         )
     """
 
-    __slots__ = ("_definition", "_name")
+    __slots__ = ("_name",)
 
-    def __init__(self, name: str, definition: SchemaDefinition) -> None:
+    def __init__(self, name: str) -> None:
         """Initialize schema reference.
 
         :param name: The schema name.
-        :param definition: The schema definition dict.
         """
         self._name = name
-        self._definition = definition
 
     @property
     def name(self) -> str:
@@ -57,11 +55,16 @@ class SchemaRef:
     def __call__(self, *, count: int = 1) -> NestedSchema:
         """Create a nested embedding of this schema.
 
+        The embedded definition is looked up on the builder from the active
+        batch snapshot when the value is resolved, so a replacement made with
+        :meth:`~mimesis.builder.SchemaBuilder.replace_schema` takes effect on
+        the next batch instead of being frozen at registration time.
+
         :param count: Number of items to generate and embed.
         :return: A NestedSchema that resolves to a list of items.
         :raises ValueError: If ``count`` is less than 1.
         """
-        return NestedSchema(self._name, self._definition, count)
+        return NestedSchema(self._name, count)
 
     def __repr__(self) -> str:
         return f"SchemaRef({self._name!r})"

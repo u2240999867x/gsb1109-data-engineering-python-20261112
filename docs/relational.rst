@@ -186,6 +186,49 @@ between runs:
 
     sb.reset()  # definitions are gone; call sb.schema() again
 
+Batch Snapshots and Replacing Schemas
+--------------------------------------
+
+Every :meth:`~mimesis.builder.SchemaBuilder.create` call is a **batch**. When a
+batch starts, the builder snapshots all registered definitions *and* derives
+the dependency graph from that same snapshot. The batch therefore always works
+from one consistent, immutable view: mutating the dictionary you originally
+passed to :meth:`~mimesis.builder.SchemaBuilder.schema` while a batch is
+running (or between batches) cannot make the graph and the generated
+definitions drift apart. Changes are picked up by the *next* batch, and that
+next batch reads the whole new set together.
+
+The snapshot only recreates the surrounding dicts, lists and tuples. Lazy
+objects such as :meth:`~mimesis.builder.SchemaBuilder.f`,
+:meth:`~mimesis.builder.SchemaBuilder.choice` and references are kept by
+reference, so a lazy object shared by several columns stays the same instance
+and any state held by its provider or key callback is preserved.
+
+To change a table deliberately, use
+:meth:`~mimesis.builder.SchemaBuilder.replace_schema` instead of mutating the
+definition in place:
+
+.. code-block:: python
+
+    users = sb.schema("users", {
+        "id": sb.f("increment"),
+        "name": sb.f("username"),
+    })
+
+    sb.create(users=3)  # batch 1: old definition
+
+    sb.replace_schema("users", {
+        "id": sb.f("increment"),
+        "email": sb.f("email"),
+    })
+
+    sb.create(users=3)  # batch 2: new definition, existing refs/FKs still work
+
+The replacement is validated before it is applied. If it would introduce a
+dependency cycle, :class:`ValueError` is raised and the builder is left
+untouched, so the current batch and the next one both keep emitting rows on
+the original acyclic graph.
+
 Multi-level Example
 -------------------
 

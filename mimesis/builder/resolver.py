@@ -18,6 +18,7 @@ __all__ = [
     "NestedSchema",
     "Resolvable",
     "SchemaRefProxy",
+    "snapshot_definition",
 ]
 
 
@@ -174,6 +175,11 @@ class SchemaRefProxy(Resolvable):
 class NestedSchema(Resolvable):
     """Embed N generated items from another schema definition.
 
+    The embedded definition is not captured here: it is read from the owning
+    builder's active batch snapshot when the value is resolved. Replacing a
+    schema therefore takes effect on the next ``create()`` batch while a
+    running batch keeps using its own pinned snapshot.
+
     Example::
 
         addresses = sb.schema("addresses", {"city": sb.f("city")})
@@ -186,18 +192,16 @@ class NestedSchema(Resolvable):
         )
     """
 
-    __slots__ = ("_count", "_definition", "_schema_name")
+    __slots__ = ("_count", "_schema_name")
 
     def __init__(
         self,
         schema_name: str,
-        definition: dict[str, Any],
         count: int,
     ) -> None:
         if count < 1:
             raise ValueError("count must be >= 1")
         self._schema_name = schema_name
-        self._definition = definition
         self._count = count
 
     def _resolve(self, builder: "SchemaBuilder") -> list[Any]:
@@ -206,13 +210,36 @@ class NestedSchema(Resolvable):
                 f"Circular nesting detected involving '{self._schema_name}'"
             )
 
+        definition = builder._get_batch_definition(self._schema_name)
+
         builder._generating.add(self._schema_name)
         try:
-            return [
-                builder._resolve_value(self._definition) for _ in range(self._count)
-            ]
+            return [builder._resolve_value(definition) for _ in range(self._count)]
         finally:
             builder._generating.discard(self._schema_name)
 
     def __repr__(self) -> str:
         return f"NestedSchema({self._schema_name!r}, count={self._count})"
+
+
+def snapshot_definition(obj: Any) -> Any:
+    """Deep-copy the *containers* of a definition without cloning its objects.
+
+    Definitions handed to :meth:`SchemaBuilder.schema` may be mutated in place
+    by the caller afterwards. A generation batch therefore works on a private
+    snapshot so its dependency graph and the definitions it generates from can
+    never drift apart.
+
+    Dicts, lists and tuples are recreated, but every other value — in
+    particular the lazy objects (:class:`Resolvable` instances), whose
+    provider and key callbacks may carry their own state — is kept by
+    reference. A lazy object shared by several columns stays the very same
+    instance in the snapshot.
+    """
+    if isinstance(obj, dict):
+        return {key: snapshot_definition(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [snapshot_definition(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(snapshot_definition(item) for item in obj)
+    return obj

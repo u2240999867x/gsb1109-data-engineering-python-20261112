@@ -14,6 +14,7 @@ from mimesis.builder.resolver import (
     NestedSchema,
     Resolvable,
     SchemaRefProxy,
+    snapshot_definition,
 )
 from mimesis.enums import TimestampFormat
 from mimesis.locales import Locale
@@ -409,9 +410,9 @@ class TestNesting:
 
     def test_circular_nesting_raises(self, sb: SchemaBuilder) -> None:
         nodes = sb.schema("nodes", {"label": sb.f("word")})
-        # Mutate definition after creation to introduce self-nesting
+        # Mutate the registered definition after creation to introduce
+        # self-nesting. The next batch snapshots the mutated definition.
         sb._schemas["nodes"]["children"] = nodes(count=1)
-        nodes._definition["children"] = nodes(count=1)
 
         with pytest.raises(ValueError, match="Circular nesting"):
             sb.create(nodes=1)
@@ -706,3 +707,178 @@ class TestComplexSchemas:
 
         # tags was also requested as top-level generation
         assert len(data["tags"]) == 6
+
+
+class TestSnapshotIsolation:
+    def _order_domain(self, sb: SchemaBuilder) -> tuple[SchemaRef, ...]:
+        customers = sb.schema(
+            "customers",
+            {"id": sb.f("increment"), "email": sb.f("email")},
+        )
+        orders = sb.schema(
+            "orders",
+            {"id": sb.f("increment"), "customer_id": sb.ref(customers).id},
+        )
+        sb.schema(
+            "order_items",
+            {"id": sb.f("increment"), "order_id": sb.ref(orders).id},
+        )
+        return customers, orders
+
+    def test_in_place_mutation_does_not_affect_running_batch(
+        self, sb: SchemaBuilder
+    ) -> None:
+        customers, _ = self._order_domain(sb)
+        original = sb._schemas["customers"]
+
+        first = sb.create(customers=2, orders=3, order_items=4)
+        assert set(first["customers"][0]) == {"id", "email"}
+
+        # The upstream caller keeps the original dict and mutates it in place.
+        original["vip"] = sb.f("boolean")
+
+        second = sb.create(customers=2, orders=3, order_items=4)
+        assert all("vip" in row for row in second["customers"])
+        assert all("vip" not in row for row in first["customers"])
+        assert customers.name == "customers"
+
+    def test_graph_is_recomputed_from_the_same_snapshot(
+        self, sb: SchemaBuilder
+    ) -> None:
+        self._order_domain(sb)
+        regions = sb.schema("regions", {"id": sb.f("increment")})
+
+        sb.create(customers=1, orders=1, order_items=1, regions=1)
+
+        # Add a brand-new FK edge by mutating the original definition.
+        sb._schemas["customers"]["region_id"] = sb.ref(regions).id
+
+        # The recomputed graph now requires regions, so omitting it fails the
+        # pre-generation check instead of crashing midway with a stale graph.
+        with pytest.raises(ValueError, match="required by 'customers'"):
+            sb.create(customers=1, orders=1, order_items=1)
+
+        data = sb.create(customers=1, orders=1, order_items=1, regions=1)
+        region_ids = {r["id"] for r in data["regions"]}
+        assert all(row["region_id"] in region_ids for row in data["customers"])
+
+    def test_snapshot_copies_containers_but_keeps_lazy_identity(self) -> None:
+        sb = SchemaBuilder(Locale.EN, seed=SEED)
+        shared = sb.f("increment", accumulator="shared")
+        original = {"a": shared, "nested": {"b": [shared]}}
+
+        snap = snapshot_definition(original)
+
+        assert snap is not original
+        assert snap["nested"] is not original["nested"]
+        assert snap["nested"]["b"] is not original["nested"]["b"]
+        # The same lazy object shared by columns remains the same instance.
+        assert snap["a"] is shared
+        assert snap["nested"]["b"][0] is shared
+
+    def test_shared_lazy_object_keeps_state_across_columns(
+        self, sb: SchemaBuilder
+    ) -> None:
+        shared = sb.f("increment", accumulator="shared")
+        sb.schema("rows", {"left": shared, "right": shared})
+
+        data = sb.create(rows=3)
+        assert [(row["left"], row["right"]) for row in data["rows"]] == [
+            (1, 2),
+            (3, 4),
+            (5, 6),
+        ]
+
+    def test_key_callback_instance_is_not_swapped(self, sb: SchemaBuilder) -> None:
+        seen: list[int] = []
+
+        class SpyKey:
+            def __call__(self, value: object) -> object:
+                seen.append(id(self))
+                return value
+
+        spy = SpyKey()
+        lazy = sb.f("word", key=spy)
+        sb.schema("rows", {"x": lazy, "y": lazy})
+
+        sb.create(rows=2)
+        assert len(seen) == 4
+        assert len(set(seen)) == 1
+
+
+class TestReplaceSchema:
+    def test_replace_takes_effect_on_next_batch_only(self, sb: SchemaBuilder) -> None:
+        users = sb.schema(
+            "users",
+            {"id": sb.f("increment"), "name": sb.f("username")},
+        )
+        sb.schema("posts", {"id": sb.f("increment"), "user_id": sb.ref(users).id})
+
+        before = sb.create(users=2, posts=2)
+        assert all(set(row) == {"id", "name"} for row in before["users"])
+
+        sb.replace_schema(
+            "users",
+            {"id": sb.f("increment"), "email": sb.f("email")},
+        )
+
+        after = sb.create(users=2, posts=2)
+        assert all(set(row) == {"id", "email"} for row in after["users"])
+        user_ids = {row["id"] for row in after["users"]}
+        assert all(row["user_id"] in user_ids for row in after["posts"])
+
+    def test_replace_undefined_schema_raises(self, sb: SchemaBuilder) -> None:
+        with pytest.raises(ValueError, match="not defined"):
+            sb.replace_schema("ghost", {"id": sb.f("increment")})
+
+    def test_cyclic_replacement_is_rejected_and_keeps_old_graph(
+        self, sb: SchemaBuilder
+    ) -> None:
+        a = sb.schema("a", {"id": sb.f("increment")})
+        b = sb.schema("b", {"a_id": sb.ref(a).id})
+
+        sb.create(a=2, b=2)
+
+        with pytest.raises(ValueError, match="Circular dependency"):
+            sb.replace_schema(
+                "a",
+                {"id": sb.f("increment"), "b_id": sb.ref(b).id},
+            )
+
+        # Builder state is untouched: both batches still emit on the old graph.
+        assert sb._dependencies["a"] == set()
+        assert sb._dependencies["b"] == {"a"}
+        again = sb.create(a=2, b=2)
+        a_ids = {row["id"] for row in again["a"]}
+        assert all(row["a_id"] in a_ids for row in again["b"])
+
+    def test_nested_schema_uses_replaced_definition_next_batch(
+        self, sb: SchemaBuilder
+    ) -> None:
+        addresses = sb.schema("addresses", {"city": sb.f("city")})
+        sb.schema(
+            "people",
+            {"name": sb.f("full_name"), "homes": addresses(count=2)},
+        )
+
+        first = sb.create(people=1)
+        assert set(first["people"][0]["homes"][0]) == {"city"}
+
+        sb.replace_schema(
+            "addresses",
+            {"city": sb.f("city"), "zip": sb.f("zip_code")},
+        )
+
+        second = sb.create(people=1)
+        assert set(second["people"][0]["homes"][0]) == {"city", "zip"}
+
+    def test_nested_only_schema_still_optional_in_create(
+        self, sb: SchemaBuilder
+    ) -> None:
+        tags = sb.schema("tags", {"name": sb.f("word")})
+        sb.schema("articles", {"title": sb.f("title"), "tags": tags(count=2)})
+
+        # Embedded-only schemas must not be forced into create() counts.
+        data = sb.create(articles=2)
+        assert all(len(article["tags"]) == 2 for article in data["articles"])
+        assert "tags" not in data
