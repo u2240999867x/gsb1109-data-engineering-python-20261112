@@ -3,6 +3,7 @@ import re
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, Hashable, List, Optional, Type, Union
 
+from .template import TemplateRenderer
 from .typing import SeedType
 
 if TYPE_CHECKING:
@@ -173,6 +174,27 @@ class Generator:
         generator.parse('{{ color:red_rgb }} - {{ pyint:small }}')
         """
         return _re_token.sub(self.__format_token, text)
+
+    def render_template(self, template: Any, variables: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        Render a named-slot template (str, dict, or list) in an isolated scope.
+
+        Slots declared with '{{ let name: provider:args }}' are evaluated once on
+        first use and shared by every '{{ name }}' reference within the same
+        scope, including across a document header and its detail lines. Each
+        detail line gets its own scope that may shadow outer slots. See
+        :mod:`faker.template` for the full syntax.
+        """
+        return TemplateRenderer(self).render(template, variables)
+
+    def render_templates(self, templates: list, variables: Optional[Dict[str, Any]] = None) -> list:
+        """
+        Render several named-slot templates. Each document is rendered in its
+        own isolated root scope, so a failure or half-resolved slot in one
+        document cannot leak into another.
+        """
+        renderer = TemplateRenderer(self)
+        return renderer.render_many(templates, variables)
 
     def __format_token(self, matches):
         formatter, argument_group = list(matches.groups())

@@ -290,6 +290,60 @@ Dynamic providers can read elements from an external source.
     fake.medical_profession()
     # 'dr.'
 
+How to generate structured documents with named slots
+------------------------------------------------------
+
+For synthetic transactions where a header and several detail lines must share
+the same value (for example one customer number), use a named-slot template
+with ``render_template``. A template is a string, dictionary, or list built
+from the usual provider tokens plus slot declarations.
+
+``{{ let customer_id: bothify:CID-#### }}`` declares a slot: its token renders
+to an empty string, and the generated value is evaluated once on first use and
+reused by every ``{{ customer_id }}`` reference in the same scope, including
+across a document header and its detail lines.
+
+.. code:: python
+
+    from faker import Faker
+
+    fake = Faker()
+
+    invoice = {
+        "header": "{{ let customer_id: bothify:CID-#### }}customer={{ customer_id }}",
+        "details": [
+            {"sku": "{{ bothify:SKU-### }}", "buyer": "{{ customer_id }}"},
+            {"sku": "{{ bothify:SKU-### }}", "buyer": "{{ customer_id }}"},
+        ],
+    }
+    fake.render_template(invoice)
+    # {'header': 'customer=CID-7101',
+    #  'details': [{'sku': 'SKU-901', 'buyer': 'CID-7101'},
+    #              {'sku': 'SKU-482', 'buyer': 'CID-7101'}]}
+
+Each detail line (a dictionary inside a list) runs in its own scope. A detail
+may declare a slot with the same name as an outer slot to shadow it for that
+detail only. Slots are evaluated lazily, so referencing a slot before its
+declaration produces the same value as declaring it first.
+
+A detail dictionary may carry an ``"optional"`` control key (a boolean, a
+probability between 0 and 1, or a string such as ``"true"``/``"false"``).
+Details that are not selected are skipped before any provider is called, so
+they pull no data.
+
+.. code:: python
+
+    fake.render_template({"details": [
+        {"value": "{{ name }}", "optional": True},
+        {"value": "{{ name }}", "optional": False},
+    ]})
+
+Circular references raise ``SlotCycleError`` and name every slot involved,
+including cycles that cross scope boundaries. ``render_templates`` renders
+several documents, each in an isolated root scope, so a failing detail can
+never leave a half-generated value that leaks into another document. Ordinary
+provider templates without slots keep working unchanged.
+
 How to customize the Lorem Provider
 -----------------------------------
 
