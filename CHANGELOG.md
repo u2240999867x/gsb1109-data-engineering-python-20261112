@@ -1,5 +1,9 @@
 # Changelog
 
+# Unreleased
+
+* Add `ResourceManifest` and `ConfigFactory.parse_file_with_manifest()` to freeze the resources, include edges and per-column provenance of one import run, with content-digest versions, include chains, override/missing/forbidden/cycle tracking and JSON serialization for offline rebuild.
+
 # Version 0.3.63
 
 * Fix wrong parameter name for pyparsing Keyword (@CribberSix) [#343]

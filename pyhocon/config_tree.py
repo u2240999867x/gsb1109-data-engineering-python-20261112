@@ -31,21 +31,31 @@ class ConfigTree(OrderedDict):
                 value.index = key
 
     @staticmethod
-    def merge_configs(a, b, copy_trees=False):
+    def merge_configs(a, b, copy_trees=False, manifest=None):
         """Merge config b into a
 
         :param a: target config
         :type a: ConfigTree
         :param b: source config
         :type b: ConfigTree
+        :param manifest: optional ResourceManifest used to propagate the
+        per-column provenance carried by ``b``.
+        :type manifest: pyhocon.resource_manifest.ResourceManifest
         :return: merged config a
         """
         for key, value in b.items():
             # if key is in both a and b and both values are dictionary then merge it otherwise override it
             if key in a and isinstance(a[key], ConfigTree) and isinstance(b[key], ConfigTree):
                 if copy_trees:
-                    a[key] = a[key].copy()
-                ConfigTree.merge_configs(a[key], b[key], copy_trees=copy_trees)
+                    original = a[key]
+                    a[key] = original.copy()
+                    for provenance_attr in ('_origin_map', '_list_origins_map',
+                                            '_manifest'):
+                        if hasattr(original, provenance_attr):
+                            setattr(a[key], provenance_attr,
+                                    getattr(original, provenance_attr))
+                ConfigTree.merge_configs(a[key], b[key], copy_trees=copy_trees,
+                                         manifest=manifest)
             else:
                 if isinstance(value, ConfigValues):
                     value.parent = a
@@ -59,6 +69,11 @@ class ConfigTree(OrderedDict):
                     else:
                         a.history[key] = a.history.get(key, []) + [value]
 
+        if manifest is None:
+            manifest = getattr(a, '_manifest', None) or getattr(b, '_manifest', None)
+        if manifest is not None:
+            from pyhocon.resource_manifest import merge_tree_origins
+            merge_tree_origins(a, b, manifest)
         return a
 
     def resolve(self, other):
@@ -460,8 +475,14 @@ class ConfigList(list):
 
 
 class ConfigInclude(object):
-    def __init__(self, tokens):
+    def __init__(self, tokens, origin=None, origins=None, list_origins=None):
         self.tokens = tokens
+        # Resource URI these tokens were loaded from (None without a manifest).
+        self.origin = origin
+        # Per top-level key resource URIs for dict includes (glob merges).
+        self.origins = origins
+        # Parallel resource URIs when the include yielded list elements.
+        self.list_origins = list_origins
 
 
 class ConfigValues(object):
@@ -570,15 +591,30 @@ class ConfigValues(object):
         elif first_tok_type is ConfigList:
             result = []
             main_index = 0
+            origin_carriers = []
+            has_origins = any(
+                getattr(sublist, '_origin_list', None) for sublist in tokens)
+            if has_origins:
+                result = ConfigList()
             for sublist in tokens:
-                sublist_result = ConfigList()
-                for token in sublist:
+                sublist_result = ConfigList() if has_origins else []
+                sublist_origins = getattr(sublist, '_origin_list', None)
+                for index, token in enumerate(sublist):
                     if isinstance(token, ConfigValues):
                         token.parent = result
                         token.key = main_index
                     main_index += 1
                     sublist_result.append(token)
+                    origin_carriers.append(
+                        sublist_origins[index]
+                        if sublist_origins is not None and index < len(sublist_origins)
+                        else None)
                 result.extend(sublist_result)
+            if has_origins:
+                setattr(result, '_origin_list', origin_carriers)
+                manifest_ref = getattr(self.parent, '_manifest', None)
+                if manifest_ref is not None:
+                    setattr(result, '_manifest', manifest_ref)
             return result
         else:
             if len(tokens) == 1:

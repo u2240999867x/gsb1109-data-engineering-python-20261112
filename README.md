@@ -265,6 +265,37 @@ Then evaluating animals.conf will result in the followings:
 
 As you can see, the attributes in cat.conf were merged to the ones in dog.conf. Note that the attribute "say" in dog.conf got overwritten by the one in cat.conf.
 
+## Resource manifest
+
+An import run can freeze everything that produced its final column mapping into a single in-memory `ResourceManifest`. Pass it while parsing and you get back, alongside the config, the resource version (content digest) that actually supplied every column, the include chain that reached it, and distinct records for overridden definitions, genuinely missing optional files and forbidden sources.
+
+    from pyhocon import ConfigFactory, ResourceManifest, origin_view
+
+    config, manifest = ConfigFactory.parse_file_with_manifest(
+        'import.conf',
+        forbidden=['file:///etc/secrets/*.conf'],
+    )
+
+    # Per-column provenance: winning resource, frozen version, include chain.
+    for column, provenance in origin_view(config, manifest).items():
+        print(column, provenance['resource'], provenance['version'])
+
+    # Distinguish the three failure classes.
+    manifest.overridden_columns()       # shadowed definitions
+    manifest.missing_resources()        # optional/required files not found
+    [e for e in manifest.includes if e['outcome'] == 'forbidden']
+
+Relative includes are always resolved from the introducing file, files with
+the same name in different directories stay distinct, and a resource reached
+through several aliases is registered once while keeping every alias. Include
+cycles raise `ConfigCircularIncludeException` carrying the concrete resource
+chain and forbidden sources raise `ConfigForbiddenIncludeException`.
+
+The manifest is the only artifact a caller needs: `manifest.to_json()`
+serializes it and `ResourceManifest.from_json(...)` restores it on another,
+offline machine, where `ResourceManifest.diff_columns(...)` verifies that the
+same ingestion columns and source versions would be rebuilt.
+
 ## Duration/Period support
 
 ### Difference from HOCON spec

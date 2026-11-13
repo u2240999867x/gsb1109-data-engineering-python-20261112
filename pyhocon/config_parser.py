@@ -33,6 +33,13 @@ from pyhocon.config_tree import (ConfigInclude, ConfigList, ConfigQuotedString,
                                  ConfigUnquotedString, ConfigValues, NoneValue)
 from pyhocon.exceptions import (ConfigException, ConfigMissingException,
                                 ConfigSubstitutionException)
+from pyhocon.resource_manifest import (INCLUDE_GLOB, INCLUDE_LOADED,
+                                       INCLUDE_MISSING, INCLUDE_MISSING_OPTIONAL,
+                                       LIST_ORIGIN_ATTR, MANIFEST_ATTR,
+                                       ORIGIN_ATTR, ORIGIN_FORBIDDEN,
+                                       ORIGIN_MISSING, ResourceManifest,
+                                       get_origin_map, merge_list_origins,
+                                       normalize_uri, stamp_key, stamp_local)
 
 from urllib.request import urlopen
 from urllib.error import HTTPError, URLError
@@ -81,7 +88,8 @@ U_KEY_FMT = '"{0}"'
 class ConfigFactory(object):
 
     @classmethod
-    def parse_file(cls, filename, encoding='utf-8', required=True, resolve=True, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse_file(cls, filename, encoding='utf-8', required=True, resolve=True,
+                   unresolved_value=DEFAULT_SUBSTITUTION, manifest=None):
         """Parse file
 
         :param filename: filename
@@ -96,9 +104,15 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param manifest: optional ResourceManifest recording every resource,
+        include edge and per-column provenance while parsing.
+        :type manifest: pyhocon.resource_manifest.ResourceManifest
         :return: Config object or []
         :type return: Config or list
         """
+        if manifest is not None:
+            return cls._parse_file_with_manifest(
+                filename, encoding, required, resolve, unresolved_value, manifest)
         try:
             with codecs.open(filename, 'r', encoding=encoding) as fd:
                 content = fd.read()
@@ -110,7 +124,39 @@ class ConfigFactory(object):
             return []
 
     @classmethod
-    def parse_URL(cls, url, timeout=None, resolve=True, required=False, unresolved_value=DEFAULT_SUBSTITUTION):
+    def _parse_file_with_manifest(cls, filename, encoding, required, resolve,
+                                  unresolved_value, manifest):
+        root_uri = normalize_uri(os.path.abspath(filename))
+        referrer = manifest.current_uri
+        manifest.begin_include(root_uri, referrer, required=required)
+        try:
+            with codecs.open(filename, 'r', encoding=encoding) as fd:
+                content = fd.read()
+        except IOError as e:
+            manifest.register_missing(root_uri, required, referrer=referrer)
+            manifest.record_include(
+                referrer, root_uri,
+                INCLUDE_MISSING if required else INCLUDE_MISSING_OPTIONAL,
+                required=required)
+            manifest.end_include(root_uri)
+            if required:
+                raise e
+            logger.warn('Cannot include file %s. File does not exist or cannot be read.', filename)
+            return []
+        manifest.register(root_uri, content=content, aliases=[filename],
+                          referrer=referrer)
+        manifest.record_include(referrer, root_uri, INCLUDE_LOADED,
+                                required=required)
+        try:
+            return cls.parse_string(
+                content, os.path.dirname(filename), resolve,
+                unresolved_value, manifest=manifest)
+        finally:
+            manifest.end_include(root_uri)
+
+    @classmethod
+    def parse_URL(cls, url, timeout=None, resolve=True, required=False,
+                  unresolved_value=DEFAULT_SUBSTITUTION, manifest=None):
         """Parse URL
 
         :param url: url to parse
@@ -121,10 +167,40 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param manifest: optional ResourceManifest recording provenance.
+        :type manifest: pyhocon.resource_manifest.ResourceManifest
         :return: Config object or []
         :type return: Config or list
         """
         socket_timeout = socket._GLOBAL_DEFAULT_TIMEOUT if timeout is None else timeout
+
+        if manifest is not None:
+            target = normalize_uri(url)
+            manifest.begin_include(target, manifest.current_uri, required=required)
+            try:
+                with contextlib.closing(urlopen(url, timeout=socket_timeout)) as fd:
+                    content = fd.read().decode('utf-8')
+            except (HTTPError, URLError) as e:
+                manifest.register_missing(target, required, referrer=manifest.current_uri)
+                manifest.record_include(
+                    manifest.current_uri, target,
+                    INCLUDE_MISSING if required else INCLUDE_MISSING_OPTIONAL,
+                    required=required)
+                manifest.end_include(target)
+                if required:
+                    raise e
+                logger.warn('Cannot include url %s. Resource is inaccessible.', url)
+                return []
+            manifest.register(target, content=content, aliases=[url],
+                              referrer=manifest.current_uri)
+            manifest.record_include(
+                manifest.current_uri, target, INCLUDE_LOADED, required=required)
+            try:
+                return cls.parse_string(
+                    content, os.path.dirname(url), resolve,
+                    unresolved_value, manifest=manifest)
+            finally:
+                manifest.end_include(target)
 
         try:
             with contextlib.closing(urlopen(url, timeout=socket_timeout)) as fd:
@@ -138,7 +214,9 @@ class ConfigFactory(object):
                 return []
 
     @classmethod
-    def parse_string(cls, content, basedir=None, resolve=True, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse_string(cls, content, basedir=None, resolve=True,
+                     unresolved_value=DEFAULT_SUBSTITUTION, manifest=None,
+                     source_uri=None):
         """Parse string
 
         :param content: content to parse
@@ -149,10 +227,26 @@ class ConfigFactory(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: class
+        :param manifest: optional ResourceManifest recording provenance.
+        :type manifest: pyhocon.resource_manifest.ResourceManifest
+        :param source_uri: optional identity of the resource holding
+        ``content``; used as the current resource when ``content`` is parsed
+        directly without going through :meth:`parse_file`.
+        :type source_uri: str
         :return: Config object
         :type return: Config
         """
-        return ConfigParser().parse(content, basedir, resolve, unresolved_value)
+        if manifest is not None and source_uri is not None:
+            source_uri = normalize_uri(source_uri)
+            manifest.begin_include(source_uri, manifest.current_uri)
+            manifest.register(source_uri, content=content)
+            try:
+                return ConfigParser().parse(
+                    content, basedir, resolve, unresolved_value, manifest=manifest)
+            finally:
+                manifest.end_include(source_uri)
+        return ConfigParser().parse(
+            content, basedir, resolve, unresolved_value, manifest=manifest)
 
     @classmethod
     def from_dict(cls, dictionary, root=False):
@@ -176,6 +270,48 @@ class ConfigFactory(object):
 
         return create_tree(dictionary)
 
+    @classmethod
+    def parse_file_with_manifest(cls, filename, encoding='utf-8', required=True,
+                                 resolve=True,
+                                 unresolved_value=DEFAULT_SUBSTITUTION,
+                                 forbidden=None):
+        """Parse a file while freezing its resource manifest.
+
+        The returned manifest is the single in-memory artifact describing every
+        resource, include edge and per-column provenance; it is JSON
+        serializable and lets an offline machine rebuild the same ingestion
+        columns with their exact source versions.
+
+        :return: ``(config, manifest)`` tuple.
+        """
+        manifest = ResourceManifest(forbidden=forbidden)
+        config = cls.parse_file(
+            filename, encoding=encoding, required=required, resolve=resolve,
+            unresolved_value=unresolved_value, manifest=manifest)
+        if isinstance(config, ConfigTree):
+            manifest.freeze_columns(config)
+        return config, manifest
+
+    @classmethod
+    def parse_string_with_manifest(cls, content, source_uri=None, basedir=None,
+                                   resolve=True,
+                                   unresolved_value=DEFAULT_SUBSTITUTION,
+                                   forbidden=None):
+        """Parse a string while freezing a resource manifest.
+
+        :param source_uri: identity of the resource holding ``content``. It
+        anchors relative includes and becomes the root of the manifest.
+        :return: ``(config, manifest)`` tuple.
+        """
+        manifest = ResourceManifest(forbidden=forbidden)
+        config = cls.parse_string(
+            content, basedir=basedir, resolve=resolve,
+            unresolved_value=unresolved_value, manifest=manifest,
+            source_uri=source_uri)
+        if isinstance(config, ConfigTree):
+            manifest.freeze_columns(config)
+        return config, manifest
+
 
 class ConfigParser(object):
     """
@@ -195,7 +331,8 @@ class ConfigParser(object):
     }
 
     @classmethod
-    def parse(cls, content, basedir=None, resolve=True, unresolved_value=DEFAULT_SUBSTITUTION):
+    def parse(cls, content, basedir=None, resolve=True,
+              unresolved_value=DEFAULT_SUBSTITUTION, manifest=None):
         """parse a HOCON content
 
         :param content: HOCON content to parse
@@ -206,6 +343,9 @@ class ConfigParser(object):
         If overridden with a default value, it will replace all unresolved values by the default value.
         If it is set to pyhocon.STR_SUBSTITUTION then it will replace the value by its substitution expression (e.g., ${x})
         :type unresolved_value: boolean
+        :param manifest: optional ResourceManifest recording resources,
+        include edges and per-column provenance.
+        :type manifest: pyhocon.resource_manifest.ResourceManifest
         :return: a ConfigTree or a list
         """
 
@@ -280,62 +420,11 @@ class ConfigParser(object):
                 else:
                     file = value
 
-            if url is not None:
-                logger.debug('Loading config from url %s', url)
-                obj = ConfigFactory.parse_URL(
-                    url,
-                    resolve=False,
-                    required=required,
-                    unresolved_value=NO_SUBSTITUTION
-                )
-            elif file is not None:
-                path = file if basedir is None else os.path.join(basedir, file)
-
-                def _make_prefix(path):
-                    return ('<root>' if path is None else '[%s]' % path).ljust(55).replace('\\', '/')
-
-                _prefix = _make_prefix(path)
-
-                def _load(path):
-                    _prefix = _make_prefix(path)
-                    logger.debug('%s Loading config from file %r', _prefix, path)
-                    obj = ConfigFactory.parse_file(
-                        path,
-                        resolve=False,
-                        required=required,
-                        unresolved_value=NO_SUBSTITUTION
-                    )
-                    logger.debug('%s Result: %s', _prefix, obj)
-                    return obj
-
-                if '*' in path or '?' in path:
-                    paths = glob(path, recursive=True)
-                    obj = None
-
-                    def _merge(a, b):
-                        if a is None or b is None:
-                            return a or b
-                        elif isinstance(a, ConfigTree) and isinstance(b, ConfigTree):
-                            return ConfigTree.merge_configs(a, b)
-                        elif isinstance(a, list) and isinstance(b, list):
-                            return a + b
-                        else:
-                            raise ConfigException('Unable to make such include (merging unexpected types: {a} and {b}',
-                                                  a=type(a), b=type(b))
-
-                    logger.debug('%s Loading following configs: %s', _prefix, paths)
-                    for p in paths:
-                        obj = _merge(obj, _load(p))
-                    logger.debug('%s Result: %s', _prefix, obj)
-
-                else:
-                    logger.debug('%s Loading single config: %s', _prefix, path)
-                    obj = _load(path)
-
-            else:
-                raise ConfigException('No file or URL specified at: {loc}: {instring}', loc=loc, instring=instring)
-
-            return ConfigInclude(obj if isinstance(obj, list) else obj.items())
+            if manifest is None:
+                obj = cls._legacy_include(url, file, required, basedir, instring, loc)
+                return ConfigInclude(obj if isinstance(obj, list) else obj.items())
+            return cls._manifest_include(
+                manifest, url, file, required, basedir, instring, loc)
 
         @contextlib.contextmanager
         def set_default_white_spaces():
@@ -392,18 +481,24 @@ class ConfigParser(object):
             root_dict_expr = Forward()
             dict_expr = Forward()
             list_expr = Forward()
+            current_origin = manifest.current_uri if manifest is not None else None
             multi_value_expr = ZeroOrMore(
                 comment_eol | include_expr | substitution_expr | dict_expr | list_expr | value_expr | (Literal(
                     '\\') - eol).suppress())
             # for a dictionary : or = is optional
             # last zeroOrMore is because we can have t = {a:4} {b: 6} {c: 7} which is dictionary concatenation
-            inside_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma))
-            inside_root_dict_expr = ConfigTreeParser(ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma),
-                                                     root=True)
+            inside_dict_expr = ConfigTreeParser(
+                ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma),
+                manifest=manifest, origin=current_origin)
+            inside_root_dict_expr = ConfigTreeParser(
+                ZeroOrMore(comment_eol | include_expr | assign_expr | eol_comma),
+                root=True, manifest=manifest, origin=current_origin)
             dict_expr << Suppress('{') - inside_dict_expr - Suppress('}')
             root_dict_expr << Suppress('{') - inside_root_dict_expr - Suppress('}')
             list_entry = ConcatenatedValueParser(multi_value_expr)
-            list_expr << Suppress('[') - ListParser(list_entry - ZeroOrMore(eol_comma - list_entry)) - Suppress(']')
+            list_expr << Suppress('[') - ListParser(
+                list_entry - ZeroOrMore(eol_comma - list_entry),
+                manifest=manifest, origin=current_origin) - Suppress(']')
 
             # special case when we have a value assignment where the string can potentially be the remainder of the line
             assign_expr << Group(
@@ -429,7 +524,151 @@ class ConfigParser(object):
 
             if unresolved_value is not NO_SUBSTITUTION and unresolved_value is not DEFAULT_SUBSTITUTION:
                 cls.unresolve_substitutions_to_value(config, unresolved_value)
+
+            if manifest is not None and isinstance(config, ConfigTree):
+                setattr(config, MANIFEST_ATTR, manifest)
         return config
+
+    @classmethod
+    def _legacy_include(cls, url, file, required, basedir, instring, loc):
+        if url is not None:
+            logger.debug('Loading config from url %s', url)
+            return ConfigFactory.parse_URL(
+                url,
+                resolve=False,
+                required=required,
+                unresolved_value=NO_SUBSTITUTION
+            )
+        elif file is not None:
+            path = file if basedir is None else os.path.join(basedir, file)
+
+            def _make_prefix(path):
+                return ('<root>' if path is None else '[%s]' % path).ljust(55).replace('\\', '/')
+
+            _prefix = _make_prefix(path)
+
+            def _load(path):
+                _prefix = _make_prefix(path)
+                logger.debug('%s Loading config from file %r', _prefix, path)
+                obj = ConfigFactory.parse_file(
+                    path,
+                    resolve=False,
+                    required=required,
+                    unresolved_value=NO_SUBSTITUTION
+                )
+                logger.debug('%s Result: %s', _prefix, obj)
+                return obj
+
+            if '*' in path or '?' in path:
+                paths = glob(path, recursive=True)
+                obj = None
+
+                def _merge(a, b):
+                    if a is None or b is None:
+                        return a or b
+                    elif isinstance(a, ConfigTree) and isinstance(b, ConfigTree):
+                        return ConfigTree.merge_configs(a, b)
+                    elif isinstance(a, list) and isinstance(b, list):
+                        return a + b
+                    else:
+                        raise ConfigException('Unable to make such include (merging unexpected types: {a} and {b}',
+                                              a=type(a), b=type(b))
+
+                logger.debug('%s Loading following configs: %s', _prefix, paths)
+                for p in paths:
+                    obj = _merge(obj, _load(p))
+                logger.debug('%s Result: %s', _prefix, obj)
+                return obj
+            else:
+                logger.debug('%s Loading single config: %s', _prefix, path)
+                return _load(path)
+        else:
+            raise ConfigException('No file or URL specified at: {loc}: {instring}', loc=loc, instring=instring)
+
+    @classmethod
+    def _manifest_include(cls, manifest, url, file, required, basedir,
+                          instring, loc):
+        referrer = manifest.current_uri
+
+        if url is not None:
+            # Concrete URLs are gated inside parse_URL -> begin_include.
+            target = normalize_uri(url)
+            obj = ConfigFactory.parse_URL(
+                url, resolve=False, required=required,
+                unresolved_value=NO_SUBSTITUTION, manifest=manifest)
+            return cls._build_include(manifest, obj, target)
+
+        if file is None:
+            raise ConfigException('No file or URL specified at: {loc}: {instring}',
+                                  loc=loc, instring=instring)
+
+        # Relative references are resolved from the introducer's directory.
+        raw_path = file if basedir is None else os.path.join(basedir, file)
+        glob_pattern = normalize_uri(os.path.abspath(raw_path))
+
+        if '*' in raw_path or '?' in raw_path:
+            # The pattern itself never reaches begin_include, gate it here;
+            # every concrete match is gated by parse_file -> begin_include.
+            manifest.reject_forbidden(glob_pattern, referrer, required=required)
+            paths = glob(raw_path, recursive=True)
+            manifest.record_include(
+                referrer, glob_pattern, INCLUDE_GLOB, required=required)
+            if not paths:
+                manifest.register_missing(
+                    glob_pattern, required, referrer=referrer,
+                    glob_pattern=glob_pattern)
+                manifest.record_include(
+                    referrer, glob_pattern,
+                    INCLUDE_MISSING if required else INCLUDE_MISSING_OPTIONAL,
+                    required=required, glob_pattern=glob_pattern)
+                if required:
+                    raise IOError('No file matching include pattern %s' % raw_path)
+                return ConfigInclude([], origin=glob_pattern)
+
+            obj = None
+            for path in paths:
+                loaded = ConfigFactory.parse_file(
+                    path, resolve=False, required=required,
+                    unresolved_value=NO_SUBSTITUTION, manifest=manifest)
+                obj = cls._merge_manifest(obj, loaded, manifest)
+            return cls._build_include(manifest, obj, glob_pattern)
+
+        # Concrete files are gated inside parse_file -> begin_include.
+        target = normalize_uri(os.path.abspath(raw_path))
+        obj = ConfigFactory.parse_file(
+            raw_path, resolve=False, required=required,
+            unresolved_value=NO_SUBSTITUTION, manifest=manifest)
+        return cls._build_include(manifest, obj, target)
+
+    @staticmethod
+    def _merge_manifest(a, b, manifest):
+        if a is None or b is None:
+            return a if a is not None else b
+        if isinstance(a, ConfigTree) and isinstance(b, ConfigTree):
+            return ConfigTree.merge_configs(a, b, manifest=manifest)
+        if isinstance(a, ConfigList) and isinstance(b, ConfigList):
+            merge_list_origins(a, b, manifest)
+            a.extend(b)
+            return a
+        raise ConfigException(
+            'Unable to make such include (merging unexpected types: {a} and {b}'.format(
+                a=type(a).__name__, b=type(b).__name__))
+
+    @staticmethod
+    def _build_include(manifest, obj, origin):
+        if isinstance(obj, list):
+            list_origins = getattr(obj, LIST_ORIGIN_ATTR, None)
+            if list_origins is None or len(list_origins) != len(obj):
+                list_origins = [origin] * len(obj)
+            return ConfigInclude(list(obj), origin=origin,
+                                 list_origins=list_origins)
+        if obj is None:
+            return ConfigInclude([], origin=origin)
+
+        pairs = list(obj.items())
+        source_map = getattr(obj, ORIGIN_ATTR, None) or {}
+        origins = [source_map.get(key, origin) for key, _ in pairs]
+        return ConfigInclude(pairs, origin=origin, origins=origins)
 
     @classmethod
     def _resolve_variable(cls, config, substitution):
@@ -564,7 +803,11 @@ class ConfigParser(object):
         if isinstance(item, ConfigValues):
             return item.transform()
         elif isinstance(item, list):
-            return list([cls._final_fixup(child) for child in item])
+            fixed = item.__class__([cls._final_fixup(child) for child in item])
+            for provenance_attr in (LIST_ORIGIN_ATTR, MANIFEST_ATTR):
+                if hasattr(item, provenance_attr):
+                    setattr(fixed, provenance_attr, getattr(item, provenance_attr))
+            return fixed
         elif isinstance(item, ConfigTree):
             items = list(item.items())
             for key, child in items:
@@ -699,9 +942,11 @@ class ListParser(TokenConverter):
     """Parse a list [elt1, etl2, ...]
     """
 
-    def __init__(self, expr=None):
+    def __init__(self, expr=None, manifest=None, origin=None):
         super(ListParser, self).__init__(expr)
         self.saveAsList = True
+        self.manifest = manifest
+        self.origin = origin
 
     def postParse(self, instring, loc, token_list):
         """Create a list from the tokens
@@ -712,6 +957,7 @@ class ListParser(TokenConverter):
         :return:
         """
         cleaned_token_list = []
+        origins = []
         # Note that a token can be a duration value object:
         # >>> relativedelta(hours = 1) == ''
         # False
@@ -728,10 +974,21 @@ class ListParser(TokenConverter):
                 continue
             if isinstance(token, ConfigInclude):
                 cleaned_token_list.extend(token.tokens)
+                include_origins = getattr(token, 'list_origins', None)
+                if include_origins is None or len(include_origins) != len(token.tokens):
+                    include_origins = [token.origin] * len(token.tokens)
+                for element, element_origin in zip(token.tokens, include_origins):
+                    origins.append(element_origin)
+                    if self.manifest is not None and isinstance(element, ConfigTree):
+                        setattr(element, MANIFEST_ATTR, self.manifest)
             else:
                 cleaned_token_list.append(token)
+                origins.append(self.origin)
 
         config_list = ConfigList(cleaned_token_list)
+        if self.manifest is not None:
+            setattr(config_list, LIST_ORIGIN_ATTR, origins)
+            setattr(config_list, MANIFEST_ATTR, self.manifest)
         return [config_list]
 
 
@@ -751,10 +1008,12 @@ class ConfigTreeParser(TokenConverter):
     Parse a config tree from tokens
     """
 
-    def __init__(self, expr=None, root=False):
+    def __init__(self, expr=None, root=False, manifest=None, origin=None):
         super(ConfigTreeParser, self).__init__(expr)
         self.root = root
         self.saveAsList = True
+        self.manifest = manifest
+        self.origin = origin
 
     def postParse(self, instring, loc, token_list):
         """Create ConfigTree from tokens
@@ -765,10 +1024,17 @@ class ConfigTreeParser(TokenConverter):
         :return:
         """
         config_tree = ConfigTree(root=self.root)
+        if self.manifest is not None:
+            setattr(config_tree, MANIFEST_ATTR, self.manifest)
         for element in token_list:
-            expanded_tokens = element.tokens if isinstance(element, ConfigInclude) else [element]
+            is_include = isinstance(element, ConfigInclude)
+            expanded_tokens = element.tokens if is_include else [element]
+            include_origins = getattr(element, 'origins', None) if is_include else None
 
-            for tokens in expanded_tokens:
+            for token_index, tokens in enumerate(expanded_tokens):
+                token_origin = include_origins[token_index] \
+                    if include_origins is not None and token_index < len(include_origins) \
+                    else getattr(element, 'origin', None) if is_include else self.origin
                 # key, value1 (optional), ...
                 key = tokens[0].strip()
                 operator = '='
@@ -782,6 +1048,8 @@ class ConfigTreeParser(TokenConverter):
                 # empty string
                 if len(values) == 0:
                     config_tree.put(key, '')
+                    if self.manifest is not None:
+                        self._stamp(config_tree, key, is_include, token_origin)
                 else:
                     value = values[0]
                     if isinstance(value, list) and operator == "+=":
@@ -815,4 +1083,36 @@ class ConfigTreeParser(TokenConverter):
                                 config_tree.put(key, conf_value, False)
                         else:
                             config_tree.put(key, value, False)
+
+                    if self.manifest is not None:
+                        self._stamp(
+                            config_tree, key, is_include, token_origin,
+                            include_value=value if is_include else None,
+                            local_value=None if is_include else value)
         return config_tree
+
+    def _stamp(self, config_tree, key, is_include, origin,
+               include_value=None, local_value=None):
+        if not is_include:
+            if isinstance(local_value, ConfigList):
+                stamp_local(config_tree, key, origin, self.manifest,
+                            value=local_value)
+            else:
+                stamp_local(config_tree, key, origin, self.manifest)
+            return
+        # Included subtrees already carry their own origin maps; only set the
+        # top-level entry so nested provenance is preserved. A scalar or list
+        # replacement from another resource is a genuine override.
+        current = config_tree.get(key, None)
+        existing = (get_origin_map(config_tree) or {}).get(key)
+        if existing is not None and existing != origin \
+                and not isinstance(current, ConfigTree) \
+                and existing not in (ORIGIN_MISSING, ORIGIN_FORBIDDEN) \
+                and origin not in (ORIGIN_MISSING, ORIGIN_FORBIDDEN):
+            self.manifest.record_override(
+                key, origin, existing, chain=self.manifest.chain_for(origin))
+        if isinstance(include_value, ConfigList):
+            stamp_key(config_tree, key, origin, self.manifest,
+                      config_list=include_value)
+        else:
+            stamp_key(config_tree, key, origin, self.manifest)
