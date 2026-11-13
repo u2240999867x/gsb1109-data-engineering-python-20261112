@@ -3172,6 +3172,233 @@ class AtomicApplyTests(unittest.TestCase):
                 self.assertFalse(jsonpatch._supports_journal(op))
 
 
+class AtomicTransactionRegressionTests(unittest.TestCase):
+    """Atomic application with one detail row reachable through two indexes.
+
+    The same row object is mounted under two paths of the document, like a
+    consumer keeping by-id and by-status indexes over shared rows, and an
+    external index holds its own reference to the row. A small reference graph
+    records the identity of every container before the call, alongside a deep
+    copy of the values. This keeps two failure outcomes apart:
+
+    * journal rollback (built-in operations) restores the original containers
+      in place, so equal values still are the same objects;
+    * the copy fallback (extensions whose changes can't be journaled) only
+      restores the root values, while references held outside the document
+      keep pointing at detached, dirty rows.
+    """
+
+    FAILING_PATCH = [
+        # array shift inside the status index
+        {'op': 'move', 'from': '/by_status/active/1',
+         'path': '/by_status/active/0'},
+        # overwrite with an equal, but freshly built value
+        {'op': 'replace', 'path': '/by_id/r1/meta',
+         'value': {'tag': 'x'}},
+        # array shift inside the shared row
+        {'op': 'add', 'path': '/by_id/r1/vals/1', 'value': 99},
+        # move a member of the row out into the status index
+        {'op': 'move', 'from': '/by_id/r1/status',
+         'path': '/by_status/last_status'},
+        # fails only after all preceding mutations have been recorded
+        {'op': 'remove', 'path': '/missing'},
+    ]
+
+    @staticmethod
+    def walk_containers(obj, path=''):
+        if isinstance(obj, (dict, list)):
+            yield path, obj
+            items = obj.items() if isinstance(obj, dict) else enumerate(obj)
+            for key, child in items:
+                yield from AtomicTransactionRegressionTests.walk_containers(
+                    child, '{0}/{1}'.format(path, key))
+
+    def build_indexed_document(self):
+        row = {'id': 'r1', 'vals': [10, 20, 30],
+               'meta': {'tag': 'x'}, 'status': 'active'}
+        sibling = {'id': 'r2', 'vals': [1],
+                   'meta': {'tag': 'y'}, 'status': 'active'}
+        doc = {
+            'by_id': {'r1': row, 'r2': sibling},
+            'by_status': {'active': [row, sibling]},
+        }
+        # an external, consumer-side index keeping its own row reference
+        external_index = [row]
+        return doc, row, sibling, external_index
+
+    def reference_snapshot(self, doc):
+        return {path: container
+                for path, container in self.walk_containers(doc)}
+
+    def test_journal_rollback_restores_identity_sharing_and_values(self):
+        doc, row, sibling, external = self.build_indexed_document()
+        patch = jsonpatch.JsonPatch(self.FAILING_PATCH)
+        # the built-in operations stay on the journal path, no document copy
+        self.assertTrue(all(map(jsonpatch._supports_journal, patch._ops)))
+
+        identity_snapshot = self.reference_snapshot(doc)
+        value_snapshot = copy.deepcopy(doc)
+        original_meta = row['meta']
+
+        with self.assertRaises(jsonpatch.JsonPatchPathNotFound):
+            patch.apply(doc, in_place=True, atomic=True)
+
+        # values are back to the pre-call state ...
+        self.assertEqual(doc, value_snapshot)
+        # ... and every container reachable from the root is the same object,
+        # so an equal value never means a swapped-in replacement
+        restored = self.reference_snapshot(doc)
+        self.assertEqual(set(restored), set(identity_snapshot))
+        for path, container in restored.items():
+            self.assertIs(container, identity_snapshot[path], path)
+
+        # the row held outside the document is still the object behind both
+        # indexes, including the overwritten meta and the shifted arrays
+        self.assertIs(external[0], row)
+        self.assertIs(doc['by_id']['r1'], row)
+        self.assertIs(doc['by_status']['active'][0], row)
+        self.assertIs(doc['by_id']['r2'], sibling)
+        self.assertIs(doc['by_id']['r1']['meta'], original_meta)
+        self.assertEqual(row['vals'], [10, 20, 30])
+        self.assertEqual(row['status'], 'active')
+        # member order removed and moved around by the patch is restored too
+        self.assertEqual(list(row), ['id', 'vals', 'meta', 'status'])
+        self.assertEqual(list(doc['by_status']), ['active'])
+
+    def test_non_atomic_failure_leaves_root_and_external_index_dirty(self):
+        doc, row, sibling, external = self.build_indexed_document()
+        with self.assertRaises(jsonpatch.JsonPatchPathNotFound):
+            jsonpatch.apply_patch(doc, self.FAILING_PATCH, in_place=True)
+
+        # the root object itself survives, but nothing is rolled back
+        self.assertIs(doc['by_id']['r1'], row)
+        self.assertEqual(row['vals'], [10, 99, 20, 30])
+        self.assertNotIn('status', row)
+        self.assertEqual(doc['by_status']['last_status'], 'active')
+        self.assertEqual(doc['by_status']['active'], [sibling, row])
+        # the external holder reads the same half-patched row through the alias
+        self.assertIs(external[0], row)
+        self.assertNotIn('status', external[0])
+
+    def test_extension_failure_restores_root_values_but_detaches_holders(self):
+        class CustomChange(jsonpatch.PatchOperation):
+            def apply(self, obj):
+                obj['by_id']['r1']['id'] = 'changed'
+                raise RuntimeError('custom boom')
+
+        class CustomPatch(jsonpatch.JsonPatch):
+            operations = MappingProxyType(dict(
+                jsonpatch.JsonPatch.operations, change=CustomChange))
+
+        extension_patches = [
+            # non-RFC operation shipped with the library
+            jsonpatch.JsonPatchWithAppend([
+                {'op': 'append', 'path': '/by_id/r1/id', 'value': '-x'},
+                {'op': 'remove', 'path': '/missing'},
+            ]),
+            # custom operation overriding apply() on a subclass
+            CustomPatch([
+                {'op': 'replace', 'path': '/by_id/r1/status', 'value': 'x'},
+                {'op': 'change', 'path': ''},
+            ]),
+        ]
+        for patch in extension_patches:
+            with self.subTest(patch=patch.patch):
+                doc, row, sibling, external = self.build_indexed_document()
+                # extensions cross the supported journal boundary: their
+                # changes cannot be undone, so a copy-based restore is used
+                self.assertFalse(
+                    all(map(jsonpatch._supports_journal, patch._ops)))
+
+                value_snapshot = copy.deepcopy(doc)
+                identity_snapshot = self.reference_snapshot(doc)
+                with self.assertRaises(Exception):
+                    patch.apply(doc, in_place=True, atomic=True)
+
+                # the root looks fully restored when compared by value ...
+                self.assertEqual(doc, value_snapshot)
+                # ... and the root container itself is restored in place via
+                # clear/update, while every nested container is a copy
+                restored = self.reference_snapshot(doc)
+                self.assertEqual(set(restored), set(identity_snapshot))
+                self.assertIs(restored[''], identity_snapshot[''])
+                self.assertTrue(
+                    all(restored[path] is not identity_snapshot[path]
+                        for path in restored if path))
+
+                restored_row = doc['by_id']['r1']
+                # equal values, different object: value comparison alone
+                # would hide that the row was exchanged
+                self.assertEqual(restored_row, value_snapshot['by_id']['r1'])
+                self.assertIsNot(restored_row, row)
+                # the two indexes inside the document share the new row ...
+                self.assertIs(doc['by_id']['r1'],
+                              doc['by_status']['active'][0])
+                # ... while the external index keeps the detached dirty row
+                self.assertIs(external[0], row)
+                self.assertIsNot(external[0], restored_row)
+                self.assertNotEqual(external[0], restored_row)
+
+    def test_extensions_are_rejected_at_the_supported_boundaries(self):
+        # first boundary: the RFC entry point rejects the non-standard
+        # operation while the patch is built, before anything is applied
+        with self.assertRaises(jsonpatch.InvalidJsonPatch):
+            jsonpatch.JsonPatch(
+                [{'op': 'append', 'path': '/message', 'value': '!'}])
+
+        # second boundary: once an extension is accepted by a subclass, the
+        # journal support check rejects it from in-place rollback, so the
+        # atomic application copies the document instead
+        standard = jsonpatch.JsonPatch([
+            {'op': op, 'path': '/a', 'from': '/b', 'value': 1}
+            for op in jsonpatch.JsonPatch.operations])
+        self.assertTrue(all(map(jsonpatch._supports_journal, standard._ops)))
+
+        append = jsonpatch.JsonPatchWithAppend(
+            [{'op': 'append', 'path': '/message', 'value': '!'}])
+        self.assertFalse(jsonpatch._supports_journal(append._ops[0]))
+
+        class InstanceOverride(jsonpatch.RemoveOperation):
+            def apply(self, obj):
+                return obj
+
+        self.assertFalse(jsonpatch._supports_journal(
+            InstanceOverride({'op': 'remove', 'path': '/a'})))
+
+    def test_atomic_without_in_place_never_touches_held_references(self):
+        doc, row, sibling, external = self.build_indexed_document()
+        with self.assertRaises(jsonpatch.JsonPatchPathNotFound):
+            jsonpatch.apply_patch(doc, self.FAILING_PATCH, atomic=True)
+        # without in_place the document is copied first; atomic has no effect
+        self.assertIs(doc['by_id']['r1'], row)
+        self.assertIs(external[0], row)
+        self.assertEqual(row['vals'], [10, 20, 30])
+        self.assertIn('status', row)
+        self.assertNotIn('last_status', doc['by_status'])
+
+    def test_corrective_patch_on_same_object_after_failure(self):
+        doc, row, sibling, external = self.build_indexed_document()
+        with self.assertRaises(jsonpatch.JsonPatchPathNotFound):
+            jsonpatch.apply_patch(doc, self.FAILING_PATCH,
+                                  in_place=True, atomic=True)
+
+        fix = jsonpatch.JsonPatch([
+            {'op': 'replace', 'path': '/by_id/r1/status',
+             'value': 'archived'},
+            {'op': 'add', 'path': '/by_id/r1/vals/-', 'value': 40},
+        ])
+        result = fix.apply(doc, in_place=True, atomic=True)
+        self.assertIs(result, doc)
+        # the rolled-back object accepts another transaction, and both
+        # indexes plus the external holder observe it through the same row
+        self.assertIs(doc['by_id']['r1'], row)
+        self.assertIs(doc['by_status']['active'][0], row)
+        self.assertIs(external[0], row)
+        self.assertEqual(row['status'], 'archived')
+        self.assertEqual(row['vals'], [10, 20, 30, 40])
+        self.assertEqual(doc['by_id']['r2'], sibling)
+
+
 class ScriptRunner:
     """ Runs the command line programs of this checkout """
 
